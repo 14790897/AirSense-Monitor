@@ -22,6 +22,7 @@ unsigned long lastUploadTime = 0;
 // MQTT主题
 String propertyPostTopic;
 String propertySetTopic;
+String propertyPostReplyTopic;
 
 // 函数声明
 void connectWiFi();
@@ -91,6 +92,7 @@ void setup() {
   // 设置MQTT主题
   propertyPostTopic = "$sys/" + String(ONENET_PRODUCT_ID) + "/" + String(ONENET_DEVICE_NAME) + "/thing/property/post";
   propertySetTopic = "$sys/" + String(ONENET_PRODUCT_ID) + "/" + String(ONENET_DEVICE_NAME) + "/thing/property/set";
+  propertyPostReplyTopic = "$sys/" + String(ONENET_PRODUCT_ID) + "/" + String(ONENET_DEVICE_NAME) + "/thing/property/post/reply";
 
   // 连接MQTT
   connectMQTT();
@@ -267,9 +269,15 @@ void connectMQTT() {
       Serial.println("🎉 MQTT连接成功！");
 
       // 订阅属性设置主题
-      bool subResult = mqttClient.subscribe(propertySetTopic.c_str());
-      Serial.println("订阅结果: " + String(subResult ? "成功" : "失败"));
+      bool subResult1 = mqttClient.subscribe(propertySetTopic.c_str());
+      Serial.println("订阅属性设置主题结果: " + String(subResult1 ? "成功" : "失败"));
       Serial.println("订阅主题: " + propertySetTopic);
+
+      // 订阅属性上报回执主题
+      bool subResult2 = mqttClient.subscribe(propertyPostReplyTopic.c_str());
+      Serial.println("订阅上报回执主题结果: " + String(subResult2 ? "成功" : "失败"));
+      Serial.println("订阅主题: " + propertyPostReplyTopic);
+
       Serial.println("=== MQTT连接流程完成 ===");
     }
     else
@@ -346,18 +354,34 @@ void publishSensorData(float temperature, float pressure, float altitude) {
   // 创建OneJSON格式的数据
   JsonDocument doc;
 
-  // 获取当前时间戳（毫秒）
-  unsigned long timestamp = millis();
-  Serial.println("时间戳: " + String(timestamp));
+  // 获取当前时间戳（毫秒）- OneNET要求13位毫秒时间戳
+  unsigned long long currentTimeSeconds = getCurrentTimestamp();
+  unsigned long long timestamp = currentTimeSeconds * 1000ULL;
 
-  // 构建属性数据
-  doc["id"] = String(millis()); // 消息ID
+  // 确保时间戳是13位数字（毫秒级）
+  if (timestamp < 1000000000000ULL)
+  {
+    // 如果时间戳太小，使用一个合理的基准时间
+    timestamp = 1704067200000ULL + millis(); // 2024年1月1日 + 运行时间
+  }
+
+  Serial.println("当前Unix时间戳(秒): " + String(currentTimeSeconds));
+  Serial.println("时间戳(毫秒): " + String(timestamp));
+  Serial.println("时间戳长度: " + String(String(timestamp).length()) + " 位");
+
+  // 构建标准OneNET JSON格式
+  doc["id"] = String(random(100000, 999999)); // 6位随机消息ID
   doc["version"] = "1.0";
-  doc["params"]["temperature"]["value"] = temperature;
+
+  // 构建params对象，每个属性包含value和time
+  // 将浮点数转换为整数以符合OneNET步长要求
+  doc["params"]["temperature"]["value"] = (int)round(temperature);
   doc["params"]["temperature"]["time"] = timestamp;
-  doc["params"]["pressure"]["value"] = pressure;
+
+  doc["params"]["pressure"]["value"] = (int)round(pressure);
   doc["params"]["pressure"]["time"] = timestamp;
-  doc["params"]["altitude"]["value"] = altitude;
+
+  doc["params"]["altitude"]["value"] = (int)round(altitude);
   doc["params"]["altitude"]["time"] = timestamp;
 
   String payload;
@@ -384,7 +408,8 @@ void publishSensorData(float temperature, float pressure, float altitude) {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("收到MQTT消息，主题: ");
+  Serial.println("=== 收到MQTT消息 ===");
+  Serial.print("主题: ");
   Serial.println(topic);
 
   String message;
@@ -392,6 +417,51 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     message += (char)payload[i];
   }
   Serial.println("消息内容: " + message);
+
+  // 判断消息类型
+  String topicStr = String(topic);
+  if (topicStr.endsWith("/thing/property/post/reply"))
+  {
+    Serial.println("📨 这是属性上报回执消息");
+
+    // 解析JSON回执
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, message);
+
+    if (!error)
+    {
+      if (doc.containsKey("code"))
+      {
+        int code = doc["code"];
+        if (code == 200)
+        {
+          Serial.println("✅ 数据上报成功！平台已确认接收");
+        }
+        else
+        {
+          Serial.println("❌ 数据上报失败，错误码: " + String(code));
+          if (doc.containsKey("msg"))
+          {
+            Serial.println("错误信息: " + String(doc["msg"].as<String>()));
+          }
+        }
+      }
+    }
+    else
+    {
+      Serial.println("⚠️ 回执消息JSON解析失败");
+    }
+  }
+  else if (topicStr.endsWith("/thing/property/set"))
+  {
+    Serial.println("📥 这是属性设置消息");
+  }
+  else
+  {
+    Serial.println("❓ 未知消息类型");
+  }
+
+  Serial.println("=== 消息处理完成 ===");
 }
 
 // 获取当前时间戳（Unix时间戳）
