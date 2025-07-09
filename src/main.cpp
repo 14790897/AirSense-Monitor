@@ -132,6 +132,16 @@ void connectWiFi() {
   Serial.println("SSID: " + String(WIFI_SSID));
   Serial.println("密码长度: " + String(strlen(WIFI_PASSWORD)));
 
+  // 可选：设置静态IP（如果不需要可以注释掉）
+  // IPAddress local_IP(192, 168, 1, 100);    // 你想要的IP地址
+  // IPAddress gateway(192, 168, 1, 1);       // 路由器IP
+  // IPAddress subnet(255, 255, 255, 0);      // 子网掩码
+  // IPAddress primaryDNS(8, 8, 8, 8);        // 主DNS
+  // IPAddress secondaryDNS(8, 8, 4, 4);      // 备用DNS
+  // if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
+  //   Serial.println("静态IP配置失败");
+  // }
+
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("连接WiFi");
 
@@ -200,9 +210,9 @@ void connectMQTT() {
     Serial.println("=== 开始MQTT连接流程 ===");
     Serial.println("MQTT服务器: " + String(MQTT_SERVER) + ":" + String(MQTT_PORT));
 
-    // 计算Token过期时间（当前时间 + 1年）
+    // 使用固定的Token过期时间（2028年1月1日）
     uint32_t currentTime = getCurrentTimestamp();
-    uint32_t expireTime = currentTime + (TOKEN_EXPIRE_HOURS * 3600);
+    uint32_t expireTime = TOKEN_EXPIRE_TIME;
 
     // 打印配置信息
     Serial.println("--- OneNET配置信息 ---");
@@ -212,7 +222,7 @@ void connectMQTT() {
     Serial.println("设备密钥长度: " + String(strlen(ONENET_DEVICE_SECRET)));
     Serial.println("当前时间戳: " + String(currentTime));
     Serial.println("Token过期时间戳(et): " + String(expireTime));
-    Serial.println("Token有效期: " + String(TOKEN_EXPIRE_HOURS) + " 小时 (" + String(TOKEN_EXPIRE_HOURS / 24) + " 天)");
+    Serial.println("Token过期时间: 2028年1月1日 (固定时间)");
     Serial.println("预期res格式: products/" + String(ONENET_PRODUCT_ID) + "/devices/" + String(ONENET_DEVICE_NAME));
 
     // 使用官方Token生成函数 - 设备级认证（一机一密）
@@ -235,15 +245,9 @@ void connectMQTT() {
       continue;
     }
 
-    Serial.println("✅ Token生成成功");
     Serial.println("完整Token: " + String(token));
-    Serial.println("Token长度: " + String(strlen(token)));
 
-    // 使用完整Token作为密码
-    Serial.println("--- 设置密码 ---");
     String password = String(token);
-    Serial.println("✅ 使用完整Token作为密码");
-    Serial.println("密码内容: " + password);
 
     String clientId = String(ONENET_DEVICE_NAME); // 使用简单方式
 
