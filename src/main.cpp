@@ -4,8 +4,9 @@
 #include <Wire.h>
 #include <Adafruit_BMP280.h>
 #include <ArduinoJson.h>
-#include <mbedtls/md.h>
+#include <time.h>
 #include "secrets.h"
+#include "onenet_token.h"
 
 // BMP280传感器对象
 Adafruit_BMP280 bmp;
@@ -27,9 +28,8 @@ void connectWiFi();
 void connectMQTT();
 void readSensorData();
 void publishSensorData(float temperature, float pressure, float altitude);
-String generateToken(const String& productId, const String& deviceName, const String& accessKey, long expireTime);
-String hmacSha1(const String& key, const String& data);
 void mqttCallback(char* topic, byte* payload, unsigned int length);
+uint32_t getCurrentTimestamp();
 
 void setup() {
   Serial.begin(115200);
@@ -58,6 +58,32 @@ void setup() {
   // 连接WiFi
   connectWiFi();
 
+  // 配置NTP时间同步
+  Serial.println("正在同步时间...");
+  configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+
+  // 等待时间同步完成
+  time_t now = time(nullptr);
+  int timeout = 0;
+  while (now < 8 * 3600 * 2 && timeout < 30)
+  {
+    delay(1000);
+    now = time(nullptr);
+    timeout++;
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (now < 8 * 3600 * 2)
+  {
+    Serial.println("⚠️ 时间同步失败，将使用相对时间");
+  }
+  else
+  {
+    Serial.println("✅ 时间同步成功");
+    Serial.println("当前时间: " + String(ctime(&now)));
+  }
+
   // 配置MQTT
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
   mqttClient.setCallback(mqttCallback);
@@ -75,13 +101,15 @@ void setup() {
 void loop() {
   // 检查WiFi连接状态
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi连接断开，尝试重新连接...");
+    Serial.println("⚠️ WiFi连接断开，尝试重新连接...");
+    Serial.println("当前WiFi状态: " + String(WiFi.status()));
     connectWiFi();
   }
 
   // 检查MQTT连接状态
   if (!mqttClient.connected()) {
-    Serial.println("MQTT连接断开，尝试重新连接...");
+    Serial.println("⚠️ MQTT连接断开，尝试重新连接...");
+    Serial.println("当前MQTT状态: " + String(mqttClient.state()));
     connectMQTT();
   }
 
@@ -90,14 +118,20 @@ void loop() {
 
   // 定时上传数据
   if (millis() - lastUploadTime >= UPLOAD_INTERVAL) {
+    Serial.println("⏰ 到达上传时间间隔，开始读取传感器数据...");
     readSensorData();
     lastUploadTime = millis();
+    Serial.println("下次上传时间: " + String((lastUploadTime + UPLOAD_INTERVAL) / 1000) + "秒后");
   }
 
   delay(1000); // 1秒延时
 }
 
 void connectWiFi() {
+  Serial.println("=== 开始WiFi连接 ===");
+  Serial.println("SSID: " + String(WIFI_SSID));
+  Serial.println("密码长度: " + String(strlen(WIFI_PASSWORD)));
+
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("连接WiFi");
 
@@ -106,43 +140,176 @@ void connectWiFi() {
     delay(500);
     Serial.print(".");
     attempts++;
+
+    // 每5次尝试打印一次状态
+    if (attempts % 5 == 0)
+    {
+      Serial.println();
+      Serial.print("尝试次数: " + String(attempts) + "/20, WiFi状态: ");
+      switch (WiFi.status())
+      {
+      case WL_IDLE_STATUS:
+        Serial.println("WL_IDLE_STATUS");
+        break;
+      case WL_NO_SSID_AVAIL:
+        Serial.println("WL_NO_SSID_AVAIL - 找不到SSID");
+        break;
+      case WL_SCAN_COMPLETED:
+        Serial.println("WL_SCAN_COMPLETED");
+        break;
+      case WL_CONNECTED:
+        Serial.println("WL_CONNECTED");
+        break;
+      case WL_CONNECT_FAILED:
+        Serial.println("WL_CONNECT_FAILED - 连接失败");
+        break;
+      case WL_CONNECTION_LOST:
+        Serial.println("WL_CONNECTION_LOST - 连接丢失");
+        break;
+      case WL_DISCONNECTED:
+        Serial.println("WL_DISCONNECTED - 未连接");
+        break;
+      default:
+        Serial.println("未知状态: " + String(WiFi.status()));
+      }
+      Serial.print("继续连接");
+    }
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println();
-    Serial.println("WiFi连接成功！");
+    Serial.println("🎉 WiFi连接成功！");
     Serial.print("IP地址: ");
     Serial.println(WiFi.localIP());
+    Serial.print("网关: ");
+    Serial.println(WiFi.gatewayIP());
+    Serial.print("DNS: ");
+    Serial.println(WiFi.dnsIP());
+    Serial.print("信号强度: ");
+    Serial.println(WiFi.RSSI());
+    Serial.println("=== WiFi连接完成 ===");
   } else {
     Serial.println();
-    Serial.println("WiFi连接失败！");
+    Serial.println("❌ WiFi连接失败！");
+    Serial.println("最终状态: " + String(WiFi.status()));
   }
 }
 
 void connectMQTT() {
   while (!mqttClient.connected()) {
-    Serial.println("尝试连接MQTT服务器...");
+    Serial.println("=== 开始MQTT连接流程 ===");
+    Serial.println("MQTT服务器: " + String(MQTT_SERVER) + ":" + String(MQTT_PORT));
 
-    // 生成Token
-    String token = generateToken(ONENET_PRODUCT_ID, ONENET_DEVICE_NAME, ONENET_ACCESS_KEY, TOKEN_EXPIRE_TIME);
+    // 计算Token过期时间（当前时间 + 1年）
+    uint32_t currentTime = getCurrentTimestamp();
+    uint32_t expireTime = currentTime + (TOKEN_EXPIRE_HOURS * 3600);
 
-    // 构建ClientID
-    String clientId = String(ONENET_DEVICE_NAME) + "|securemode=2,signmethod=hmacsha1,timestamp=" + String(TOKEN_EXPIRE_TIME) + "|";
+    // 打印配置信息
+    Serial.println("--- OneNET配置信息 ---");
+    Serial.println("认证模式: 设备级认证（一机一密）");
+    Serial.println("产品ID: " + String(ONENET_PRODUCT_ID));
+    Serial.println("设备名称: " + String(ONENET_DEVICE_NAME));
+    Serial.println("设备密钥长度: " + String(strlen(ONENET_DEVICE_SECRET)));
+    Serial.println("当前时间戳: " + String(currentTime));
+    Serial.println("Token过期时间戳(et): " + String(expireTime));
+    Serial.println("Token有效期: " + String(TOKEN_EXPIRE_HOURS) + " 小时 (" + String(TOKEN_EXPIRE_HOURS / 24) + " 天)");
+    Serial.println("预期res格式: products/" + String(ONENET_PRODUCT_ID) + "/devices/" + String(ONENET_DEVICE_NAME));
 
+    // 使用官方Token生成函数 - 设备级认证（一机一密）
+    char token[512] = {0};
+    Serial.println("--- 开始生成Token ---");
+    Serial.println("使用认证模式: 设备级认证（一机一密）");
+    int result = onenet_token_generate(
+        token,
+        SIG_METHOD_SHA1, // 使用SHA1签名方法
+        expireTime,
+        ONENET_PRODUCT_ID,
+        ONENET_DEVICE_NAME,    // 使用设备名，res格式为 products/{产品ID}/devices/{设备名}
+        ONENET_DEVICE_SECRET); // 使用设备密钥
+
+    Serial.println("Token生成结果码: " + String(result));
+    if (result != 0)
+    {
+      Serial.println("❌ Token生成失败！错误码: " + String(result));
+      delay(5000);
+      continue;
+    }
+
+    Serial.println("✅ Token生成成功");
+    Serial.println("完整Token: " + String(token));
+    Serial.println("Token长度: " + String(strlen(token)));
+
+    // 使用完整Token作为密码
+    Serial.println("--- 设置密码 ---");
+    String password = String(token);
+    Serial.println("✅ 使用完整Token作为密码");
+    Serial.println("密码内容: " + password);
+
+    String clientId = String(ONENET_DEVICE_NAME); // 使用简单方式
+
+    Serial.println("--- MQTT连接参数 ---");
     Serial.println("ClientID: " + clientId);
     Serial.println("Username: " + String(ONENET_PRODUCT_ID));
-    Serial.println("Password: " + token);
+    Serial.println("Password: " + password);
 
-    if (mqttClient.connect(clientId.c_str(), ONENET_PRODUCT_ID, token.c_str())) {
-      Serial.println("MQTT连接成功！");
+    Serial.println("--- 尝试MQTT连接 ---");
+    bool connectResult = mqttClient.connect(clientId.c_str(), ONENET_PRODUCT_ID, password.c_str());
+
+    Serial.println("MQTT连接函数返回: " + String(connectResult ? "true" : "false"));
+    Serial.println("MQTT状态码: " + String(mqttClient.state()));
+
+    if (connectResult && mqttClient.connected())
+    {
+      Serial.println("🎉 MQTT连接成功！");
 
       // 订阅属性设置主题
-      mqttClient.subscribe(propertySetTopic.c_str());
+      bool subResult = mqttClient.subscribe(propertySetTopic.c_str());
+      Serial.println("订阅结果: " + String(subResult ? "成功" : "失败"));
       Serial.println("订阅主题: " + propertySetTopic);
+      Serial.println("=== MQTT连接流程完成 ===");
+    }
+    else
+    {
+      Serial.println("❌ MQTT连接失败！");
+      Serial.print("详细错误码: ");
+      int state = mqttClient.state();
+      Serial.println(state);
 
-    } else {
-      Serial.print("MQTT连接失败，错误码: ");
-      Serial.println(mqttClient.state());
+      // 详细的错误码说明
+      switch (state)
+      {
+      case -4:
+        Serial.println("错误: MQTT_CONNECTION_TIMEOUT - 服务器没有在keepalive时间内响应");
+        break;
+      case -3:
+        Serial.println("错误: MQTT_CONNECTION_LOST - 网络连接中断");
+        break;
+      case -2:
+        Serial.println("错误: MQTT_CONNECT_FAILED - 网络连接失败");
+        break;
+      case -1:
+        Serial.println("错误: MQTT_DISCONNECTED - 客户端未连接");
+        break;
+      case 1:
+        Serial.println("错误: MQTT_CONNECT_BAD_PROTOCOL - 服务器不支持请求的MQTT协议版本");
+        break;
+      case 2:
+        Serial.println("错误: MQTT_CONNECT_BAD_CLIENT_ID - 服务器拒绝了客户端标识符");
+        break;
+      case 3:
+        Serial.println("错误: MQTT_CONNECT_UNAVAILABLE - 服务器不可用");
+        break;
+      case 4:
+        Serial.println("错误: MQTT_CONNECT_BAD_CREDENTIALS - 用户名或密码错误");
+        break;
+      case 5:
+        Serial.println("错误: MQTT_CONNECT_UNAUTHORIZED - 客户端未授权连接");
+        break;
+      default:
+        Serial.println("未知错误码");
+      }
+
+      Serial.println("等待5秒后重试...");
       delay(5000);
     }
   }
@@ -170,11 +337,14 @@ void readSensorData() {
 }
 
 void publishSensorData(float temperature, float pressure, float altitude) {
+  Serial.println("=== 开始发布传感器数据 ===");
+
   // 创建OneJSON格式的数据
   JsonDocument doc;
 
   // 获取当前时间戳（毫秒）
   unsigned long timestamp = millis();
+  Serial.println("时间戳: " + String(timestamp));
 
   // 构建属性数据
   doc["id"] = String(millis()); // 消息ID
@@ -189,15 +359,24 @@ void publishSensorData(float temperature, float pressure, float altitude) {
   String payload;
   serializeJson(doc, payload);
 
-  Serial.println("发布数据到OneNET...");
+  Serial.println("--- 发布信息 ---");
   Serial.println("主题: " + propertyPostTopic);
-  Serial.println("数据: " + payload);
+  Serial.println("数据长度: " + String(payload.length()));
+  Serial.println("JSON数据: " + payload);
+
+  Serial.println("--- MQTT连接状态检查 ---");
+  Serial.println("MQTT连接状态: " + String(mqttClient.connected() ? "已连接" : "未连接"));
+  Serial.println("MQTT状态码: " + String(mqttClient.state()));
 
   if (mqttClient.publish(propertyPostTopic.c_str(), payload.c_str())) {
-    Serial.println("数据发布成功！");
+    Serial.println("✅ 数据发布成功！");
   } else {
-    Serial.println("数据发布失败！");
+    Serial.println("❌ 数据发布失败！");
+    Serial.println("MQTT当前状态: " + String(mqttClient.state()));
+    Serial.println("主题长度: " + String(propertyPostTopic.length()));
+    Serial.println("负载长度: " + String(payload.length()));
   }
+  Serial.println("=== 数据发布流程完成 ===");
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -211,44 +390,20 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.println("消息内容: " + message);
 }
 
-String generateToken(const String& productId, const String& deviceName, const String& accessKey, long expireTime) {
-  // 构建签名字符串
-  String stringToSign = "products/" + productId + "/devices/" + deviceName + expireTime;
+// 获取当前时间戳（Unix时间戳）
+uint32_t getCurrentTimestamp()
+{
+  time_t now = time(nullptr);
 
-  // 计算HMAC-SHA1
-  String signature = hmacSha1(accessKey, stringToSign);
-
-  return signature;
-}
-
-String hmacSha1(const String& key, const String& data) {
-  // 使用mbedtls计算HMAC-SHA1
-  unsigned char hmac_result[20];
-
-  mbedtls_md_context_t ctx;
-  mbedtls_md_type_t md_type = MBEDTLS_MD_SHA1;
-
-  mbedtls_md_init(&ctx);
-  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 1);
-  mbedtls_md_hmac_starts(&ctx, (const unsigned char*)key.c_str(), key.length());
-  mbedtls_md_hmac_update(&ctx, (const unsigned char*)data.c_str(), data.length());
-  mbedtls_md_hmac_finish(&ctx, hmac_result);
-  mbedtls_md_free(&ctx);
-
-  // 转换为Base64
-  String encoded = "";
-  const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-  for (int i = 0; i < 20; i += 3) {
-    unsigned int val = (hmac_result[i] << 16) |
-                       ((i + 1 < 20) ? (hmac_result[i + 1] << 8) : 0) |
-                       ((i + 2 < 20) ? hmac_result[i + 2] : 0);
-
-    encoded += chars[(val >> 18) & 0x3F];
-    encoded += chars[(val >> 12) & 0x3F];
-    encoded += (i + 1 < 20) ? chars[(val >> 6) & 0x3F] : '=';
-    encoded += (i + 2 < 20) ? chars[val & 0x3F] : '=';
+  // 如果时间同步失败，使用相对时间（从启动开始的秒数）
+  if (now < 8 * 3600 * 2)
+  {
+    // 时间同步失败，使用一个基准时间戳 + 运行时间
+    // 使用2024年1月1日作为基准时间戳: 1704067200
+    uint32_t baseTimestamp = 1704067200;
+    uint32_t runningSeconds = millis() / 1000;
+    return baseTimestamp + runningSeconds;
   }
 
-  return encoded;
+  return (uint32_t)now;
 }
