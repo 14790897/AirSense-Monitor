@@ -106,6 +106,7 @@ pio device monitor
   }
 }
 ```
+![physical-mdoel](physical_model.png)
 
 **MQTT主题**：
 - 属性上报：`$sys/{product_id}/{device_name}/thing/property/post`
