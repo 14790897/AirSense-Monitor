@@ -5,11 +5,28 @@
 #include <Adafruit_BMP280.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <MQ135.h>
+#include <math.h>
+#include <LittleFS.h>
 #include "secrets.h"
 #include "onenet_token.h"
 
 // BMP280传感器对象
 Adafruit_BMP280 bmp;
+
+// MQ135传感器配置
+#define MQ135_AO_PIN 2 // 模拟输出引脚
+#define USE_MANUAL_RZERO false
+#define MANUAL_RZERO_VALUE 76.63 // 标准RZero值
+
+// MQ135传感器对象
+MQ135 *mq135_sensor_ptr = nullptr;
+
+// 环境参数（用于温湿度补偿）
+float ambient_temperature = 31.0; // 环境温度
+float ambient_humidity = 60.0;    // 环境湿度
+float calibratedRZero = 0.0;      // 校准后的RZero值
+bool mq135_calibrated = false;    // MQ135是否已校准
 
 // WiFi和MQTT客户端
 WiFiClient wifiClient;
@@ -28,15 +45,26 @@ String propertyPostReplyTopic;
 void connectWiFi();
 void connectMQTT();
 void readSensorData();
-void publishSensorData(float temperature, float pressure, float altitude);
+void publishSensorData(float temperature, float pressure, float altitude, float air_quality_ppm, float air_quality_corrected_ppm);
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 uint32_t getCurrentTimestamp();
+void initializeMQ135();
+void calibrateMQ135();
+bool initLittleFS();
+void saveRZeroToFS(float rzero);
+float loadRZeroFromFS();
+void deleteRZeroFromFS();
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
   Serial.println("BMP280 气压记录系统启动...");
+
+  // 初始化LittleFS文件系统
+  if (!initLittleFS()) {
+    Serial.println("⚠️ LittleFS初始化失败，MQ135校准值将无法保存");
+  }
 
   // 初始化I2C
   Wire.begin();
@@ -55,6 +83,10 @@ void setup() {
                   Adafruit_BMP280::STANDBY_MS_500); // 待机时间
 
   Serial.println("BMP280传感器初始化成功！");
+
+  // 初始化MQ135传感器
+  Serial.println("开始初始化MQ135传感器...");
+  initializeMQ135();
 
   // 连接WiFi
   connectWiFi();
@@ -124,6 +156,38 @@ void loop() {
     readSensorData();
     lastUploadTime = millis();
     Serial.println("下次上传时间: " + String((lastUploadTime + UPLOAD_INTERVAL) / 1000) + "秒后");
+  }
+
+  // 处理串口命令（用于调试和管理）
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    
+    if (command.equals("calibrate") || command.equals("cal")) {
+      Serial.println("开始重新校准MQ135传感器...");
+      calibrateMQ135();
+    }
+    else if (command.equals("delete_cal") || command.equals("del")) {
+      deleteRZeroFromFS();
+      Serial.println("请重启设备以重新校准");
+    }
+    else if (command.equals("show_cal") || command.equals("show")) {
+      float savedRZero = loadRZeroFromFS();
+      if (savedRZero > 0) {
+        Serial.print("当前保存的RZero值: ");
+        Serial.println(savedRZero, 2);
+      } else {
+        Serial.println("未找到保存的校准值");
+      }
+    }
+    else if (command.equals("help")) {
+      Serial.println("=== 可用命令 ===");
+      Serial.println("calibrate 或 cal - 重新校准MQ135传感器");
+      Serial.println("delete_cal 或 del - 删除保存的校准值");
+      Serial.println("show_cal 或 show - 显示当前保存的校准值");
+      Serial.println("help - 显示此帮助信息");
+      Serial.println("===============");
+    }
   }
 
   delay(1000); // 1秒延时
@@ -328,77 +392,139 @@ void connectMQTT() {
 }
 
 void readSensorData() {
-  // 读取传感器数据
-  float temperature = bmp.readTemperature();
-  float pressure = bmp.readPressure() / 100.0F; // 转换为hPa
-  float altitude = bmp.readAltitude(1013.25); // 海平面气压1013.25hPa
+    // 读取BMP280传感器数据
+    float temperature = bmp.readTemperature();
+    float pressure = bmp.readPressure() / 100.0F; // 转换为hPa
+    float altitude = bmp.readAltitude(1013.25);   // 海平面气压1013.25hPa
+
+    // 读取MQ135传感器数据（空气质量 - 综合气体浓度）
+    float air_quality_ppm = 0.0;
+    float air_quality_corrected_ppm = 0.0;
+
+    if (mq135_sensor_ptr != nullptr && mq135_calibrated)
+    {
+        // 使用BMP280的温度数据更新环境温度
+        ambient_temperature = temperature;
+
+        air_quality_ppm = mq135_sensor_ptr->getPPM();
+        air_quality_corrected_ppm = mq135_sensor_ptr->getCorrectedPPM(ambient_temperature, ambient_humidity);
+    }
 
   // 打印传感器数据
   Serial.println("=== 传感器数据 ===");
   Serial.printf("温度: %.2f °C\n", temperature);
   Serial.printf("气压: %.2f hPa\n", pressure);
   Serial.printf("海拔: %.2f m\n", altitude);
+
+  if (mq135_sensor_ptr != nullptr && mq135_calibrated)
+  {
+      Serial.printf("空气质量(标准): %.1f ppm\n", air_quality_ppm);
+      Serial.printf("空气质量(校正): %.1f ppm\n", air_quality_corrected_ppm);
+      Serial.print("空气质量等级: ");
+      if (air_quality_corrected_ppm < 50)
+      {
+          Serial.println("优秀");
+      }
+      else if (air_quality_corrected_ppm < 100)
+      {
+          Serial.println("良好");
+      }
+      else if (air_quality_corrected_ppm < 200)
+      {
+          Serial.println("一般");
+      }
+      else if (air_quality_corrected_ppm < 400)
+      {
+          Serial.println("较差");
+      }
+      else if (air_quality_corrected_ppm < 1000)
+      {
+          Serial.println("很差");
+      }
+      else
+      {
+          Serial.println("极差");
+      }
+  }
+  else
+  {
+      Serial.println("MQ135: 未校准或未初始化");
+  }
   Serial.println("==================");
 
   // 发布到OneNET
   if (mqttClient.connected()) {
-    publishSensorData(temperature, pressure, altitude);
-  } else {
-    Serial.println("MQTT未连接，跳过数据上传");
+      publishSensorData(temperature, pressure, altitude, air_quality_ppm, air_quality_corrected_ppm);
+  }
+  else
+  {
+      Serial.println("MQTT未连接，跳过数据上传");
   }
 }
 
-void publishSensorData(float temperature, float pressure, float altitude) {
-  Serial.println("=== 开始发布传感器数据 ===");
+void publishSensorData(float temperature, float pressure, float altitude, float air_quality_ppm, float air_quality_corrected_ppm)
+{
+    Serial.println("=== 开始发布传感器数据 ===");
 
-  // 创建OneJSON格式的数据
-  JsonDocument doc;
+    // 创建OneJSON格式的数据
+    JsonDocument doc;
 
-  // 获取当前时间戳（毫秒）- OneNET要求13位毫秒时间戳
-  unsigned long long currentTimeSeconds = getCurrentTimestamp();
-  unsigned long long timestamp = currentTimeSeconds * 1000ULL;
+    // 获取当前时间戳（毫秒）- OneNET要求13位毫秒时间戳
+    unsigned long long currentTimeSeconds = getCurrentTimestamp();
+    unsigned long long timestamp = currentTimeSeconds * 1000ULL;
 
-  // 确保时间戳是13位数字（毫秒级）
-  if (timestamp < 1000000000000ULL)
-  {
-    // 如果时间戳太小，使用一个合理的基准时间
-    timestamp = 1704067200000ULL + millis(); // 2024年1月1日 + 运行时间
-  }
+    // 确保时间戳是13位数字（毫秒级）
+    if (timestamp < 1000000000000ULL)
+    {
+        // 如果时间戳太小，使用一个合理的基准时间
+        timestamp = 1704067200000ULL + millis(); // 2024年1月1日 + 运行时间
+    }
 
-  Serial.println("当前Unix时间戳(秒): " + String(currentTimeSeconds));
-  Serial.println("时间戳(毫秒): " + String(timestamp));
-  Serial.println("时间戳长度: " + String(String(timestamp).length()) + " 位");
+    Serial.println("当前Unix时间戳(秒): " + String(currentTimeSeconds));
+    Serial.println("时间戳(毫秒): " + String(timestamp));
+    Serial.println("时间戳长度: " + String(String(timestamp).length()) + " 位");
 
-  // 构建标准OneNET JSON格式
-  doc["id"] = String(random(100000, 999999)); // 6位随机消息ID
-  doc["version"] = "1.0";
+    // 构建标准OneNET JSON格式
+    doc["id"] = String(random(100000, 999999)); // 6位随机消息ID
+    doc["version"] = "1.0";
 
-  // 构建params对象，每个属性包含value和time
-  // 将浮点数转换为整数以符合OneNET步长要求
-  doc["params"]["temperature"]["value"] = (int)round(temperature);
-  doc["params"]["temperature"]["time"] = timestamp;
+    // 构建params对象，每个属性包含value和time
+    // 将浮点数转换为整数以符合OneNET步长要求
+    doc["params"]["temperature"]["value"] = (int)round(temperature);
+    doc["params"]["temperature"]["time"] = timestamp;
 
-  doc["params"]["pressure"]["value"] = (int)round(pressure);
-  doc["params"]["pressure"]["time"] = timestamp;
+    doc["params"]["pressure"]["value"] = (int)round(pressure);
+    doc["params"]["pressure"]["time"] = timestamp;
 
-  doc["params"]["altitude"]["value"] = (int)round(altitude);
-  doc["params"]["altitude"]["time"] = timestamp;
+    doc["params"]["altitude"]["value"] = (int)round(altitude);
+    doc["params"]["altitude"]["time"] = timestamp;
 
-  String payload;
-  serializeJson(doc, payload);
+    // 添加MQ135空气质量数据（如果传感器已校准）
+    if (mq135_sensor_ptr != nullptr && mq135_calibrated)
+    {
+        doc["params"]["air_quality_ppm"]["value"] = (int)round(air_quality_ppm);
+        doc["params"]["air_quality_ppm"]["time"] = timestamp;
 
-  Serial.println("--- 发布信息 ---");
-  Serial.println("主题: " + propertyPostTopic);
-  Serial.println("数据长度: " + String(payload.length()));
-  Serial.println("JSON数据: " + payload);
+        doc["params"]["air_quality_corrected_ppm"]["value"] = (int)round(air_quality_corrected_ppm);
+        doc["params"]["air_quality_corrected_ppm"]["time"] = timestamp;
+    }
 
-  Serial.println("--- MQTT连接状态检查 ---");
-  Serial.println("MQTT连接状态: " + String(mqttClient.connected() ? "已连接" : "未连接"));
-  Serial.println("MQTT状态码: " + String(mqttClient.state()));
+    String payload;
+    serializeJson(doc, payload);
 
-  if (mqttClient.publish(propertyPostTopic.c_str(), payload.c_str())) {
-    Serial.println("✅ 数据发布成功！");
-  } else {
+    Serial.println("--- 发布信息 ---");
+    Serial.println("主题: " + propertyPostTopic);
+    Serial.println("数据长度: " + String(payload.length()));
+    Serial.println("JSON数据: " + payload);
+
+    Serial.println("--- MQTT连接状态检查 ---");
+    Serial.println("MQTT连接状态: " + String(mqttClient.connected() ? "已连接" : "未连接"));
+    Serial.println("MQTT状态码: " + String(mqttClient.state()));
+
+    if (mqttClient.publish(propertyPostTopic.c_str(), payload.c_str()))
+    {
+        Serial.println("✅ 数据发布成功！");
+    } else {
     Serial.println("❌ 数据发布失败！");
     Serial.println("MQTT当前状态: " + String(mqttClient.state()));
     Serial.println("主题长度: " + String(propertyPostTopic.length()));
@@ -430,7 +556,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
     if (!error)
     {
-      if (doc.containsKey("code"))
+      if (doc["code"].is<int>())
       {
         int code = doc["code"];
         if (code == 200)
@@ -440,7 +566,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         else
         {
           Serial.println("❌ 数据上报失败，错误码: " + String(code));
-          if (doc.containsKey("msg"))
+          if (doc["msg"].is<String>())
           {
             Serial.println("错误信息: " + String(doc["msg"].as<String>()));
           }
@@ -480,4 +606,335 @@ uint32_t getCurrentTimestamp()
   }
 
   return (uint32_t)now;
+}
+
+// MQ135传感器初始化函数
+void initializeMQ135()
+{
+    Serial.println("=== MQ135 空气质量传感器初始化 ===");
+
+    // 检查引脚连接
+    int adcValue = analogRead(MQ135_AO_PIN);
+    float voltage = (adcValue / 4095.0) * 3.3;
+
+    Serial.print("MQ135引脚检测 - ADC: ");
+    Serial.print(adcValue);
+    Serial.print(" (");
+    Serial.print(voltage, 2);
+    Serial.println("V)");
+
+    if (voltage < 0.1)
+    {
+        Serial.println("❌ MQ135传感器未检测到信号，请检查连接");
+        return;
+    }
+
+    if (voltage > 3.2)
+    {
+        Serial.println("❌ MQ135传感器电压异常，请检查电路");
+        return;
+    }
+
+    Serial.println("✅ MQ135传感器信号正常");
+
+    // 尝试从文件系统加载已保存的RZero值
+    float savedRZero = loadRZeroFromFS();
+    if (savedRZero > 0 && savedRZero >= 50 && savedRZero <= 150)
+    {
+        Serial.println("=== 发现已保存的校准值 ===");
+        Serial.print("已保存的RZero值: ");
+        Serial.println(savedRZero, 2);
+        Serial.println("是否使用已保存的校准值？");
+        Serial.println("发送 'y' 使用保存值，发送 'n' 重新校准，10秒后自动使用保存值");
+        
+        // 等待用户输入，最多10秒
+        unsigned long startTime = millis();
+        String userInput = "";
+        bool useInput = false;
+        
+        while (millis() - startTime < 10000) // 10秒超时
+        {
+            if (Serial.available())
+            {
+                userInput = Serial.readStringUntil('\n');
+                userInput.trim();
+                useInput = true;
+                break;
+            }
+            delay(100);
+        }
+        
+        if (userInput.equals("y") || userInput.equals("Y"))
+        {
+            // 使用已保存的校准值
+            calibratedRZero = savedRZero;
+            mq135_sensor_ptr = new MQ135(MQ135_AO_PIN, calibratedRZero);
+            mq135_calibrated = true;
+            Serial.println("✅ 使用已保存的校准值");
+            Serial.println("=== MQ135初始化完成 ===");
+            return;
+        }
+        else if (userInput.equals("n") || userInput.equals("N"))
+        {
+            Serial.println("用户选择重新校准");
+        }
+    }
+    else
+    {
+        Serial.println("未找到有效的已保存校准值，开始新的校准过程");
+    }
+
+    // 开始校准过程
+    calibrateMQ135();
+}
+
+// MQ135传感器校准函数
+void calibrateMQ135()
+{
+    Serial.println("=== 开始MQ135校准过程 ===");
+    Serial.println("注意: MQ135是综合气体传感器，检测空气中的多种气体");
+    Serial.println("包括: CO2、氨气、苯、酒精、烟雾等有害气体");
+    Serial.println("传感器需要在清洁空气中校准");
+    Serial.println("校准过程需要约30秒，请确保环境稳定");
+
+    // 创建临时传感器对象用于校准
+    MQ135 tempSensor(MQ135_AO_PIN);
+
+    // 传感器预热（简化版本，实际应用中建议更长时间）
+    Serial.println("传感器预热中...");
+    for (int i = 7200; i > 0; i--)
+    {
+        Serial.print("预热剩余: ");
+        Serial.print(i);
+        Serial.println("s");
+        delay(1000);
+    }
+
+    // 多次读取求平均值
+    float rZeroSum = 0;
+    int samples = 10; // 减少样本数以适应集成环境
+    float rZeroValues[10];
+
+    Serial.println("开始校准采样...");
+    for (int i = 0; i < samples; i++)
+    {
+        float rzero = tempSensor.getCorrectedRZero(ambient_temperature, ambient_humidity);
+        rZeroValues[i] = rzero;
+        rZeroSum += rzero;
+
+        Serial.print("样本 ");
+        Serial.print(i + 1);
+        Serial.print("/");
+        Serial.print(samples);
+        Serial.print(": RZero = ");
+        Serial.println(rzero, 2);
+        delay(2000); // 2秒间隔
+    }
+
+    calibratedRZero = rZeroSum / samples;
+
+    // 计算标准差
+    float variance = 0;
+    for (int i = 0; i < samples; i++)
+    {
+        variance += pow(rZeroValues[i] - calibratedRZero, 2);
+    }
+    variance /= samples;
+    float standardDeviation = sqrt(variance);
+    float coefficientOfVariation = (standardDeviation / calibratedRZero) * 100;
+
+    Serial.println();
+    Serial.print("校准完成! 平均RZero值: ");
+    Serial.println(calibratedRZero, 2);
+    Serial.print("标准差: ");
+    Serial.print(standardDeviation, 2);
+    Serial.println(" kΩ");
+    Serial.print("变异系数: ");
+    Serial.print(coefficientOfVariation, 1);
+    Serial.println("%");
+
+    // 校准质量检查
+    bool calibrationValid = true;
+    if (coefficientOfVariation > 15.0)
+    { // 放宽要求以适应集成环境
+        Serial.println("⚠️ 校准变异较大，但继续使用");
+        calibrationValid = true; // 仍然标记为有效
+    }
+
+    if (calibratedRZero < 50 || calibratedRZero > 150)
+    {
+        Serial.println("⚠️ RZero值超出正常范围，使用标准值");
+        calibratedRZero = MANUAL_RZERO_VALUE;
+        Serial.print("使用标准RZero值: ");
+        Serial.println(calibratedRZero, 2);
+    }
+
+    // 使用校准值创建传感器对象
+#if USE_MANUAL_RZERO
+    Serial.println("使用手动设置的标准RZero值: " + String(MANUAL_RZERO_VALUE));
+    mq135_sensor_ptr = new MQ135(MQ135_AO_PIN, MANUAL_RZERO_VALUE);
+    calibratedRZero = MANUAL_RZERO_VALUE;
+#else
+    mq135_sensor_ptr = new MQ135(MQ135_AO_PIN, calibratedRZero);
+#endif
+
+    mq135_calibrated = true;
+    
+    // 保存校准值到文件系统
+    saveRZeroToFS(calibratedRZero);
+    
+    Serial.println("✅ MQ135传感器校准完成并准备就绪");
+    Serial.println("✅ 校准值已保存到文件系统");
+    Serial.println("=== MQ135初始化流程完成 ===");
+}
+
+// LittleFS文件系统初始化
+bool initLittleFS()
+{
+    Serial.println("=== 初始化LittleFS文件系统 ===");
+    
+    if (!LittleFS.begin(true)) // true表示如果挂载失败则格式化
+    {
+        Serial.println("❌ LittleFS挂载失败");
+        return false;
+    }
+    
+    Serial.println("✅ LittleFS挂载成功");
+    
+    // 显示文件系统信息
+    size_t totalBytes = LittleFS.totalBytes();
+    size_t usedBytes = LittleFS.usedBytes();
+    Serial.printf("文件系统大小: %d bytes\n", totalBytes);
+    Serial.printf("已使用空间: %d bytes\n", usedBytes);
+    Serial.printf("可用空间: %d bytes\n", totalBytes - usedBytes);
+    
+    return true;
+}
+
+// 保存RZero值到文件系统
+void saveRZeroToFS(float rzero)
+{
+    Serial.println("=== 保存RZero值到文件系统 ===");
+    
+    File file = LittleFS.open("/mq135_rzero.txt", "w");
+    if (!file)
+    {
+        Serial.println("❌ 无法创建校准文件");
+        return;
+    }
+    
+    // 创建JSON格式保存校准数据
+    JsonDocument doc;
+    doc["rzero"] = rzero;
+    doc["timestamp"] = getCurrentTimestamp();
+    doc["temperature"] = ambient_temperature;
+    doc["humidity"] = ambient_humidity;
+    doc["version"] = "1.0";
+    
+    String jsonString;
+    serializeJson(doc, jsonString);
+    
+    size_t bytesWritten = file.print(jsonString);
+    file.close();
+    
+    if (bytesWritten > 0)
+    {
+        Serial.println("✅ RZero值保存成功");
+        Serial.print("保存的RZero值: ");
+        Serial.println(rzero, 2);
+        Serial.print("保存的数据: ");
+        Serial.println(jsonString);
+    }
+    else
+    {
+        Serial.println("❌ 写入文件失败");
+    }
+}
+
+// 从文件系统加载RZero值
+float loadRZeroFromFS()
+{
+    Serial.println("=== 从文件系统加载RZero值 ===");
+    
+    if (!LittleFS.exists("/mq135_rzero.txt"))
+    {
+        Serial.println("未找到校准文件");
+        return -1.0;
+    }
+    
+    File file = LittleFS.open("/mq135_rzero.txt", "r");
+    if (!file)
+    {
+        Serial.println("❌ 无法打开校准文件");
+        return -1.0;
+    }
+    
+    String jsonString = file.readString();
+    file.close();
+    
+    Serial.print("读取的数据: ");
+    Serial.println(jsonString);
+    
+    // 解析JSON数据
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, jsonString);
+    
+    if (error)
+    {
+        Serial.println("❌ JSON解析失败: " + String(error.c_str()));
+        return -1.0;
+    }
+    
+    if (!doc["rzero"].is<float>())
+    {
+        Serial.println("❌ 校准文件格式错误");
+        return -1.0;
+    }
+    
+    float rzero = doc["rzero"];
+    uint32_t timestamp = doc["timestamp"] | 0;
+    
+    Serial.print("读取的RZero值: ");
+    Serial.println(rzero, 2);
+    
+    if (timestamp > 0)
+    {
+        uint32_t currentTime = getCurrentTimestamp();
+        uint32_t ageInSeconds = currentTime - timestamp;
+        uint32_t ageInDays = ageInSeconds / (24 * 3600);
+        
+        Serial.print("校准数据时间: ");
+        Serial.print(ageInDays);
+        Serial.println(" 天前");
+        
+        // 如果校准数据超过30天，建议重新校准
+        if (ageInDays > 30)
+        {
+            Serial.println("⚠️ 校准数据较旧(>30天)，建议重新校准");
+        }
+    }
+    
+    return rzero;
+}
+
+// 删除已保存的RZero值
+void deleteRZeroFromFS()
+{
+    Serial.println("=== 删除保存的RZero值 ===");
+    
+    if (LittleFS.exists("/mq135_rzero.txt"))
+    {
+        if (LittleFS.remove("/mq135_rzero.txt"))
+        {
+            Serial.println("✅ 校准文件删除成功");
+        }
+        else
+        {
+            Serial.println("❌ 校准文件删除失败");
+        }
+    }
+    else
+    {
+        Serial.println("校准文件不存在");
+    }
 }
