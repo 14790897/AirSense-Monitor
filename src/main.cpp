@@ -7,12 +7,15 @@
 #include <time.h>
 #include <MQ135.h>
 #include <math.h>
-#include <LittleFS.h>
+#include <Preferences.h>
 #include "secrets.h"
 #include "onenet_token.h"
 
 // BMP280传感器对象
 Adafruit_BMP280 bmp;
+
+// Preferences对象用于存储配置
+Preferences preferences;
 
 // MQ135传感器配置
 #define MQ135_AO_PIN 2 // 模拟输出引脚
@@ -50,10 +53,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length);
 uint32_t getCurrentTimestamp();
 void initializeMQ135();
 void calibrateMQ135();
-bool initLittleFS();
-void saveRZeroToFS(float rzero);
-float loadRZeroFromFS();
-void deleteRZeroFromFS();
+bool initPreferences();
+void saveRZeroToPreferences(float rzero);
+float loadRZeroFromPreferences();
+void deleteRZeroFromPreferences();
 
 void setup() {
   Serial.begin(115200);
@@ -61,9 +64,9 @@ void setup() {
 
   Serial.println("BMP280 气压记录系统启动...");
 
-  // 初始化LittleFS文件系统
-  if (!initLittleFS()) {
-    Serial.println("⚠️ LittleFS初始化失败，MQ135校准值将无法保存");
+  // 初始化Preferences
+  if (!initPreferences()) {
+    Serial.println("⚠️ Preferences初始化失败，MQ135校准值将无法保存");
   }
 
   // 初始化I2C
@@ -168,11 +171,11 @@ void loop() {
       calibrateMQ135();
     }
     else if (command.equals("delete_cal") || command.equals("del")) {
-      deleteRZeroFromFS();
+      deleteRZeroFromPreferences();
       Serial.println("请重启设备以重新校准");
     }
     else if (command.equals("show_cal") || command.equals("show")) {
-      float savedRZero = loadRZeroFromFS();
+      float savedRZero = loadRZeroFromPreferences();
       if (savedRZero > 0) {
         Serial.print("当前保存的RZero值: ");
         Serial.println(savedRZero, 2);
@@ -637,8 +640,8 @@ void initializeMQ135()
 
     Serial.println("✅ MQ135传感器信号正常");
 
-    // 尝试从文件系统加载已保存的RZero值
-    float savedRZero = loadRZeroFromFS();
+    // 尝试从Preferences加载已保存的RZero值
+    float savedRZero = loadRZeroFromPreferences();
     if (savedRZero > 0 && savedRZero >= 50 && savedRZero <= 150)
     {
         Serial.println("=== 发现已保存的校准值 ===");
@@ -780,122 +783,115 @@ void calibrateMQ135()
 
     mq135_calibrated = true;
     
-    // 保存校准值到文件系统
-    saveRZeroToFS(calibratedRZero);
+    // 保存校准值到Preferences
+    saveRZeroToPreferences(calibratedRZero);
     
     Serial.println("✅ MQ135传感器校准完成并准备就绪");
-    Serial.println("✅ 校准值已保存到文件系统");
+    Serial.println("✅ 校准值已保存到Preferences");
     Serial.println("=== MQ135初始化流程完成 ===");
 }
 
-// LittleFS文件系统初始化
-bool initLittleFS()
+// Preferences初始化
+bool initPreferences()
 {
-    Serial.println("=== 初始化LittleFS文件系统 ===");
+    Serial.println("=== 初始化Preferences ===");
     
-    if (!LittleFS.begin(true)) // true表示如果挂载失败则格式化
+    // 开始Preferences，使用"mq135"命名空间
+    bool result = preferences.begin("mq135", false); // false表示读写模式
+    
+    if (!result)
     {
-        Serial.println("❌ LittleFS挂载失败");
+        Serial.println("❌ Preferences初始化失败");
         return false;
     }
     
-    Serial.println("✅ LittleFS挂载成功");
+    Serial.println("✅ Preferences初始化成功");
     
-    // 显示文件系统信息
-    size_t totalBytes = LittleFS.totalBytes();
-    size_t usedBytes = LittleFS.usedBytes();
-    Serial.printf("文件系统大小: %d bytes\n", totalBytes);
-    Serial.printf("已使用空间: %d bytes\n", usedBytes);
-    Serial.printf("可用空间: %d bytes\n", totalBytes - usedBytes);
+    // 显示已存储的键
+    Serial.println("当前存储的配置项:");
+    if (preferences.isKey("rzero"))
+    {
+        Serial.println("- rzero: 已存储");
+    }
+    if (preferences.isKey("timestamp"))
+    {
+        Serial.println("- timestamp: 已存储");
+    }
+    if (preferences.isKey("temperature"))
+    {
+        Serial.println("- temperature: 已存储");
+    }
+    if (preferences.isKey("humidity"))
+    {
+        Serial.println("- humidity: 已存储");
+    }
     
     return true;
 }
 
-// 保存RZero值到文件系统
-void saveRZeroToFS(float rzero)
+// 保存RZero值到Preferences
+void saveRZeroToPreferences(float rzero)
 {
-    Serial.println("=== 保存RZero值到文件系统 ===");
+    Serial.println("=== 保存RZero值到Preferences ===");
     
-    File file = LittleFS.open("/mq135_rzero.txt", "w");
-    if (!file)
-    {
-        Serial.println("❌ 无法创建校准文件");
-        return;
-    }
+    // 保存校准数据
+    size_t result1 = preferences.putFloat("rzero", rzero);
+    size_t result2 = preferences.putUInt("timestamp", getCurrentTimestamp());
+    size_t result3 = preferences.putFloat("temperature", ambient_temperature);
+    size_t result4 = preferences.putFloat("humidity", ambient_humidity);
+    size_t result5 = preferences.putString("version", "1.0");
     
-    // 创建JSON格式保存校准数据
-    JsonDocument doc;
-    doc["rzero"] = rzero;
-    doc["timestamp"] = getCurrentTimestamp();
-    doc["temperature"] = ambient_temperature;
-    doc["humidity"] = ambient_humidity;
-    doc["version"] = "1.0";
-    
-    String jsonString;
-    serializeJson(doc, jsonString);
-    
-    size_t bytesWritten = file.print(jsonString);
-    file.close();
-    
-    if (bytesWritten > 0)
+    if (result1 > 0 && result2 > 0)
     {
         Serial.println("✅ RZero值保存成功");
         Serial.print("保存的RZero值: ");
         Serial.println(rzero, 2);
-        Serial.print("保存的数据: ");
-        Serial.println(jsonString);
+        Serial.print("保存的时间戳: ");
+        Serial.println(getCurrentTimestamp());
+        Serial.print("保存的温度: ");
+        Serial.println(ambient_temperature, 1);
+        Serial.print("保存的湿度: ");
+        Serial.println(ambient_humidity, 1);
     }
     else
     {
-        Serial.println("❌ 写入文件失败");
+        Serial.println("❌ 保存失败");
     }
 }
 
-// 从文件系统加载RZero值
-float loadRZeroFromFS()
+// 从Preferences加载RZero值
+float loadRZeroFromPreferences()
 {
-    Serial.println("=== 从文件系统加载RZero值 ===");
+    Serial.println("=== 从Preferences加载RZero值 ===");
     
-    if (!LittleFS.exists("/mq135_rzero.txt"))
+    // 检查是否存在RZero值
+    if (!preferences.isKey("rzero"))
     {
-        Serial.println("未找到校准文件");
+        Serial.println("未找到保存的校准值");
         return -1.0;
     }
     
-    File file = LittleFS.open("/mq135_rzero.txt", "r");
-    if (!file)
+    // 读取校准数据
+    float rzero = preferences.getFloat("rzero", -1.0);
+    uint32_t timestamp = preferences.getUInt("timestamp", 0);
+    float temperature = preferences.getFloat("temperature", 0.0);
+    float humidity = preferences.getFloat("humidity", 0.0);
+    String version = preferences.getString("version", "unknown");
+    
+    if (rzero <= 0)
     {
-        Serial.println("❌ 无法打开校准文件");
+        Serial.println("❌ 读取的RZero值无效");
         return -1.0;
     }
-    
-    String jsonString = file.readString();
-    file.close();
-    
-    Serial.print("读取的数据: ");
-    Serial.println(jsonString);
-    
-    // 解析JSON数据
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, jsonString);
-    
-    if (error)
-    {
-        Serial.println("❌ JSON解析失败: " + String(error.c_str()));
-        return -1.0;
-    }
-    
-    if (!doc["rzero"].is<float>())
-    {
-        Serial.println("❌ 校准文件格式错误");
-        return -1.0;
-    }
-    
-    float rzero = doc["rzero"];
-    uint32_t timestamp = doc["timestamp"] | 0;
     
     Serial.print("读取的RZero值: ");
     Serial.println(rzero, 2);
+    Serial.print("保存时的温度: ");
+    Serial.println(temperature, 1);
+    Serial.print("保存时的湿度: ");
+    Serial.println(humidity, 1);
+    Serial.print("数据版本: ");
+    Serial.println(version);
     
     if (timestamp > 0)
     {
@@ -918,23 +914,40 @@ float loadRZeroFromFS()
 }
 
 // 删除已保存的RZero值
-void deleteRZeroFromFS()
+void deleteRZeroFromPreferences()
 {
     Serial.println("=== 删除保存的RZero值 ===");
     
-    if (LittleFS.exists("/mq135_rzero.txt"))
+    bool result = true;
+    
+    // 删除所有相关的键
+    if (preferences.isKey("rzero"))
     {
-        if (LittleFS.remove("/mq135_rzero.txt"))
-        {
-            Serial.println("✅ 校准文件删除成功");
-        }
-        else
-        {
-            Serial.println("❌ 校准文件删除失败");
-        }
+        result &= preferences.remove("rzero");
+    }
+    if (preferences.isKey("timestamp"))
+    {
+        result &= preferences.remove("timestamp");
+    }
+    if (preferences.isKey("temperature"))
+    {
+        result &= preferences.remove("temperature");
+    }
+    if (preferences.isKey("humidity"))
+    {
+        result &= preferences.remove("humidity");
+    }
+    if (preferences.isKey("version"))
+    {
+        result &= preferences.remove("version");
+    }
+    
+    if (result)
+    {
+        Serial.println("✅ 校准数据删除成功");
     }
     else
     {
-        Serial.println("校准文件不存在");
+        Serial.println("❌ 校准数据删除失败");
     }
 }
