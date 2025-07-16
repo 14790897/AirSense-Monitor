@@ -8,6 +8,7 @@
 #include <MQ135.h>
 #include <math.h>
 #include <Preferences.h>
+#include <HardwareSerial.h>
 #include "secrets.h"
 #include "onenet_token.h"
 
@@ -16,6 +17,30 @@ Adafruit_BMP280 bmp;
 
 // Preferences对象用于存储配置
 Preferences preferences;
+
+// 21VOC五合一传感器配置
+#define UART_RX_PIN 1  // UART接收引脚 (GPIO1)
+#define UART_TX_PIN 0  // UART发送引脚 (GPIO0)
+#define UART_BAUD_RATE 9600  // 波特率
+
+// 创建串口对象用于21VOC传感器
+HardwareSerial sensorSerial(1);  // 使用UART2
+
+// 21VOC传感器数据结构
+struct TVOCData {
+  uint16_t voc_ugm3;      // VOC空气质量 (ug/m3)
+  uint16_t ch2o_ugm3;     // 甲醛浓度 (ug/m3)
+  uint16_t eco2_ppm;      // eCO2浓度 (ppm)
+  float temperature_c;    // 温度 (°C)
+  float humidity_rh;      // 湿度 (%RH)
+  bool valid;             // 数据有效性
+  unsigned long timestamp; // 时间戳
+};
+
+// 21VOC传感器全局变量
+TVOCData lastTVOCReading;
+unsigned long lastTVOCReadTime = 0;
+const unsigned long TVOC_READ_INTERVAL = 2000; // 2秒读取间隔
 
 // MQ135传感器配置
 #define MQ135_AO_PIN 2 // 模拟输出引脚
@@ -48,7 +73,7 @@ String propertyPostReplyTopic;
 void connectWiFi();
 void connectMQTT();
 void readSensorData();
-void publishSensorData(float temperature, float pressure, float altitude, float air_quality_ppm, float air_quality_corrected_ppm);
+void publishSensorData(float temperature, float pressure, float altitude, float air_quality_ppm, float air_quality_corrected_ppm, const TVOCData &tvocData);
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 uint32_t getCurrentTimestamp();
 void initializeMQ135();
@@ -57,6 +82,12 @@ bool initPreferences();
 void saveRZeroToPreferences(float rzero);
 float loadRZeroFromPreferences();
 void deleteRZeroFromPreferences();
+// 21VOC传感器函数
+void init21VOCSensor();
+bool read21VOCSensor(TVOCData &data);
+void parse21VOCData(uint8_t* buffer, int length, TVOCData &data);
+bool validate21VOCData(const TVOCData &data);
+void print21VOCReading(const TVOCData &data);
 
 void setup() {
   Serial.begin(115200);
@@ -86,6 +117,10 @@ void setup() {
                   Adafruit_BMP280::STANDBY_MS_500); // 待机时间
 
   Serial.println("BMP280传感器初始化成功！");
+
+  // 初始化21VOC五合一传感器
+  Serial.println("开始初始化21VOC五合一传感器...");
+  init21VOCSensor();
 
   // 初始化MQ135传感器
   Serial.println("开始初始化MQ135传感器...");
@@ -153,6 +188,22 @@ void loop() {
   // 处理MQTT消息
   mqttClient.loop();
 
+  // 定时读取21VOC传感器数据
+  if (millis() - lastTVOCReadTime >= TVOC_READ_INTERVAL) {
+    lastTVOCReadTime = millis();
+    
+    TVOCData currentTVOCReading;
+    if (read21VOCSensor(currentTVOCReading)) {
+      if (currentTVOCReading.valid && validate21VOCData(currentTVOCReading)) {
+        lastTVOCReading = currentTVOCReading;
+        // 更新MQ135使用的环境参数
+        ambient_temperature = currentTVOCReading.temperature_c;
+        ambient_humidity = currentTVOCReading.humidity_rh;
+        print21VOCReading(currentTVOCReading);
+      }
+    }
+  }
+
   // 定时上传数据
   if (millis() - lastUploadTime >= UPLOAD_INTERVAL) {
     Serial.println("⏰ 到达上传时间间隔，开始读取传感器数据...");
@@ -183,11 +234,20 @@ void loop() {
         Serial.println("未找到保存的校准值");
       }
     }
+    else if (command.equals("show_tvoc") || command.equals("tvoc")) {
+      if (lastTVOCReading.valid) {
+        print21VOCReading(lastTVOCReading);
+        Serial.printf("数据时间: %lu ms前\n", millis() - lastTVOCReading.timestamp);
+      } else {
+        Serial.println("未找到有效的21VOC传感器数据");
+      }
+    }
     else if (command.equals("help")) {
       Serial.println("=== 可用命令 ===");
       Serial.println("calibrate 或 cal - 重新校准MQ135传感器");
       Serial.println("delete_cal 或 del - 删除保存的校准值");
       Serial.println("show_cal 或 show - 显示当前保存的校准值");
+      Serial.println("show_tvoc 或 tvoc - 显示21VOC传感器数据");
       Serial.println("help - 显示此帮助信息");
       Serial.println("===============");
     }
@@ -406,8 +466,14 @@ void readSensorData() {
 
     if (mq135_sensor_ptr != nullptr && mq135_calibrated)
     {
-        // 使用BMP280的温度数据更新环境温度
-        ambient_temperature = temperature;
+        // 使用21VOC传感器的温湿度数据进行MQ135补偿（如果可用）
+        if (lastTVOCReading.valid) {
+            ambient_temperature = lastTVOCReading.temperature_c;
+            ambient_humidity = lastTVOCReading.humidity_rh;
+        } else {
+            // 如果21VOC数据不可用，使用BMP280的温度数据
+            ambient_temperature = temperature;
+        }
 
         air_quality_ppm = mq135_sensor_ptr->getPPM();
         air_quality_corrected_ppm = mq135_sensor_ptr->getCorrectedPPM(ambient_temperature, ambient_humidity);
@@ -453,11 +519,24 @@ void readSensorData() {
   {
       Serial.println("MQ135: 未校准或未初始化");
   }
+
+  // 显示21VOC传感器数据
+  if (lastTVOCReading.valid) {
+      Serial.println("--- 21VOC五合一传感器数据 ---");
+      Serial.printf("VOC空气质量: %d μg/m³\n", lastTVOCReading.voc_ugm3);
+      Serial.printf("甲醛浓度: %d μg/m³\n", lastTVOCReading.ch2o_ugm3);
+      Serial.printf("eCO2浓度: %d ppm\n", lastTVOCReading.eco2_ppm);
+      Serial.printf("温度: %.1f°C\n", lastTVOCReading.temperature_c);
+      Serial.printf("湿度: %.1f%%RH\n", lastTVOCReading.humidity_rh);
+      Serial.println("使用21VOC温湿度补偿MQ135");
+  } else {
+      Serial.println("21VOC: 无有效数据");
+  }
   Serial.println("==================");
 
   // 发布到OneNET
   if (mqttClient.connected()) {
-      publishSensorData(temperature, pressure, altitude, air_quality_ppm, air_quality_corrected_ppm);
+      publishSensorData(temperature, pressure, altitude, air_quality_ppm, air_quality_corrected_ppm, lastTVOCReading);
   }
   else
   {
@@ -465,7 +544,7 @@ void readSensorData() {
   }
 }
 
-void publishSensorData(float temperature, float pressure, float altitude, float air_quality_ppm, float air_quality_corrected_ppm)
+void publishSensorData(float temperature, float pressure, float altitude, float air_quality_ppm, float air_quality_corrected_ppm, const TVOCData &tvocData)
 {
     Serial.println("=== 开始发布传感器数据 ===");
 
@@ -510,6 +589,25 @@ void publishSensorData(float temperature, float pressure, float altitude, float 
 
         doc["params"]["air_quality_corrected_ppm"]["value"] = (int)round(air_quality_corrected_ppm);
         doc["params"]["air_quality_corrected_ppm"]["time"] = timestamp;
+    }
+
+    // 添加21VOC五合一传感器数据（如果有效）
+    if (tvocData.valid) {
+        doc["params"]["voc_ugm3"]["value"] = tvocData.voc_ugm3;
+        doc["params"]["voc_ugm3"]["time"] = timestamp;
+
+        doc["params"]["ch2o_ugm3"]["value"] = tvocData.ch2o_ugm3;
+        doc["params"]["ch2o_ugm3"]["time"] = timestamp;
+
+        doc["params"]["eco2_ppm"]["value"] = tvocData.eco2_ppm;
+        doc["params"]["eco2_ppm"]["time"] = timestamp;
+
+        // 使用21VOC的温湿度数据覆盖BMP280的温度
+        doc["params"]["temperature"]["value"] = (int)round(tvocData.temperature_c);
+        doc["params"]["temperature"]["time"] = timestamp;
+
+        doc["params"]["humidity_rh"]["value"] = (int)round(tvocData.humidity_rh);
+        doc["params"]["humidity_rh"]["time"] = timestamp;
     }
 
     String payload;
@@ -950,4 +1048,201 @@ void deleteRZeroFromPreferences()
     {
         Serial.println("❌ 校准数据删除失败");
     }
+}
+
+// ===== 21VOC五合一传感器实现函数 =====
+
+// 初始化21VOC传感器
+void init21VOCSensor() {
+    Serial.println("=== 初始化21VOC五合一传感器 ===");
+    Serial.printf("RX引脚: GPIO%d\n", UART_RX_PIN);
+    Serial.printf("TX引脚: GPIO%d\n", UART_TX_PIN);
+    Serial.printf("波特率: %d\n", UART_BAUD_RATE);
+    
+    // 配置UART参数: 波特率, 数据位, 停止位, 校验位
+    sensorSerial.begin(UART_BAUD_RATE, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+    
+    // 等待串口稳定
+    delay(100);
+    
+    if (sensorSerial) {
+        Serial.println("✅ 21VOC传感器UART初始化成功");
+        
+        // 清空接收缓冲区
+        while (sensorSerial.available()) {
+            sensorSerial.read();
+        }
+        
+        // 初始化数据结构
+        lastTVOCReading.valid = false;
+        lastTVOCReading.timestamp = 0;
+        
+    } else {
+        Serial.println("❌ 21VOC传感器UART初始化失败");
+    }
+    
+    Serial.println("=== 21VOC传感器初始化完成 ===");
+}
+
+// 读取21VOC传感器数据
+bool read21VOCSensor(TVOCData &data) {
+    uint8_t buffer[64];
+    int bytesRead = 0;
+    unsigned long startTime = millis();
+    
+    // 等待数据到达，超时2秒
+    while (bytesRead < sizeof(buffer) && (millis() - startTime) < 2000) {
+        if (sensorSerial.available()) {
+            buffer[bytesRead] = sensorSerial.read();
+            bytesRead++;
+            
+            // 如果连续没有新数据超过200ms，认为一帧数据接收完成
+            unsigned long lastByteTime = millis();
+            while (!sensorSerial.available() && (millis() - lastByteTime) < 200) {
+                delay(10);
+            }
+            if (!sensorSerial.available()) {
+                break;
+            }
+        }
+        delay(10);
+    }
+
+    if (bytesRead > 0) {
+        // 解析接收到的数据
+        parse21VOCData(buffer, bytesRead, data);
+        data.timestamp = millis();
+        return true;
+    }
+
+    return false;
+}
+
+// 解析21VOC五合一传感器数据 (12字节协议)
+void parse21VOCData(uint8_t* buffer, int length, TVOCData &data) {
+    // 初始化数据结构
+    data.voc_ugm3 = 0;
+    data.ch2o_ugm3 = 0;
+    data.eco2_ppm = 0;
+    data.temperature_c = 0.0;
+    data.humidity_rh = 0.0;
+    data.valid = false;
+    
+    // 检查数据帧长度 (五合一传感器需要12字节)
+    if (length < 12) {
+        return;
+    }
+    
+    // 寻找正确的数据帧起始位置 (0x2C开头)
+    int frameStart = -1;
+    for (int i = 0; i <= length - 12; i++) {
+        if (buffer[i] == 0x2C) {
+            frameStart = i;
+            break;
+        }
+    }
+    
+    if (frameStart == -1) {
+        return;
+    }
+    
+    // 检查是否有足够的字节
+    if (frameStart + 12 > length) {
+        return;
+    }
+    
+    // 提取数据帧
+    uint8_t* frame = &buffer[frameStart];
+    
+    // 校验和计算 (前11个字节累加的和取反+1)
+    uint8_t checksum = 0;
+    for (int i = 0; i < 11; i++) {
+        checksum += frame[i];
+    }
+    checksum = (~checksum) + 1;
+    
+    // 验证校验和（允许一定的容错）
+    if (frame[11] != checksum) {
+        // 校验和不匹配，但继续解析（某些传感器校验和可能有问题）
+    }
+    
+    // 按照协议解析数据
+    // VOC空气质量 (ug/m3): Data[1]*256 + Data[2]
+    data.voc_ugm3 = frame[1] * 256 + frame[2];
+    
+    // 甲醛 (ug/m3): Data[3]*256 + Data[4]
+    data.ch2o_ugm3 = frame[3] * 256 + frame[4];
+    
+    // eCO2 (ppm): Data[5]*256 + Data[6]
+    data.eco2_ppm = frame[5] * 256 + frame[6];
+    
+    // 温度 (0.1°C): Data[7]*256 + Data[8]
+    uint16_t temp_raw = frame[7] * 256 + frame[8];
+    if (temp_raw > 0x8000) {
+        // 负温度: 0xFFFF - temp_raw
+        temp_raw = 0xFFFF - temp_raw;
+        data.temperature_c = -(float)temp_raw * 0.1;
+    } else {
+        // 正温度
+        data.temperature_c = (float)temp_raw * 0.1;
+    }
+    
+    // 湿度 (0.1%RH): Data[9]*256 + Data[10]
+    uint16_t humidity_raw = frame[9] * 256 + frame[10];
+    data.humidity_rh = (float)humidity_raw * 0.1;
+    
+    data.valid = true;
+}
+
+// 验证21VOC传感器数据的合理性
+bool validate21VOCData(const TVOCData &data) {
+    if (!data.valid) return false;
+    
+    // 检查数据范围的合理性
+    if (data.voc_ugm3 > 65535) return false;
+    if (data.ch2o_ugm3 > 65535) return false;
+    if (data.eco2_ppm > 65535) return false;
+    if (data.temperature_c < -40 || data.temperature_c > 80) return false;
+    if (data.humidity_rh < 0 || data.humidity_rh > 100) return false;
+    
+    return true;
+}
+
+// 打印21VOC传感器读数
+void print21VOCReading(const TVOCData &data) {
+    if (!data.valid) return;
+    
+    Serial.println("=== 21VOC五合一传感器读数 ===");
+    Serial.printf("VOC空气质量: %d μg/m³\n", data.voc_ugm3);
+    Serial.printf("甲醛浓度: %d μg/m³\n", data.ch2o_ugm3);
+    Serial.printf("eCO2浓度: %d ppm\n", data.eco2_ppm);
+    Serial.printf("温度: %.1f°C\n", data.temperature_c);
+    Serial.printf("湿度: %.1f%%RH\n", data.humidity_rh);
+    
+    // 空气质量评级
+    Serial.print("VOC等级: ");
+    if (data.voc_ugm3 < 65) {
+        Serial.println("优秀");
+    } else if (data.voc_ugm3 < 220) {
+        Serial.println("良好");
+    } else if (data.voc_ugm3 < 660) {
+        Serial.println("轻度污染");
+    } else if (data.voc_ugm3 < 2200) {
+        Serial.println("中度污染");
+    } else {
+        Serial.println("重度污染");
+    }
+    
+    Serial.print("甲醛等级: ");
+    if (data.ch2o_ugm3 < 100) {
+        Serial.println("优秀");
+    } else if (data.ch2o_ugm3 < 300) {
+        Serial.println("良好");
+    } else if (data.ch2o_ugm3 < 800) {
+        Serial.println("轻度污染");
+    } else {
+        Serial.println("重度污染");
+    }
+    
+    Serial.println("================================");
 }

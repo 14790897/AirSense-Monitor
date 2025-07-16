@@ -4,5 +4,11 @@
         "**/*.rpa": true,
         "**/*.rpymc": true,
         "**/cache/": true
+    },
+    "files.associations": {
+        "*.page-template": "vue",
+        "*.layout-template": "vue",
+        "*.vue": "vue",
+        "*.backup": "cpp"
     }
 }
