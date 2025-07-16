@@ -1,0 +1,45 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Upload HW181-MC Test",
+			"type": "shell",
+			"command": "pio",
+			"args": [
+				"run",
+				"-t",
+				"upload"
+			],
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			]
+		},
+		{
+			"label": "Monitor Serial Output",
+			"type": "shell",
+			"command": "pio",
+			"args": [
+				"device",
+				"monitor"
+			],
+			"group": "test",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Build HW181-MC Test",
+			"type": "shell",
+			"command": "pio",
+			"args": [
+				"run"
+			],
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			]
+		}
+	]
+}

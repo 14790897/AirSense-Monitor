@@ -1,0 +1,587 @@
+#include <Arduino.h>
+#include <Preferences.h>
+#include "nvs_flash.h"
+
+// HW181-MIC 分贝检测模块配置
+#define SOUND_SENSOR_ANALOG_PIN 3 // 模拟输出引脚 (GPIO1 - ADC1_CH0)
+
+// 测试参数
+unsigned long lastReadTime = 0;
+const unsigned long READ_INTERVAL = 100; // 100ms读取间隔
+unsigned long soundDetectedCount = 0;    // 声音检测计数
+unsigned long totalReadings = 0;         // 总读取次数
+
+// 声音检测参数 (基于信号变化)
+int lastAnalogValue = 0; // 上一次的模拟值
+
+// 电压转换参数
+const float ADC_REF_VOLTAGE = 3.3; // ADC参考电压 (ESP32C3) (3.3V)
+const int ADC_RESOLUTION = 4096;   // 12位ADC分辨率 (0-4095)
+
+// 电压转换函数
+float adcToVoltage(int adcValue)
+{
+  return (adcValue * ADC_REF_VOLTAGE) / ADC_RESOLUTION;
+}
+
+// 校准相关变量
+bool calibrationMode = false;
+int baselineValue = 0;
+int calibrationCount = 0;
+const int CALIBRATION_SAMPLES = 1200; // 1分钟校准 (1200 * 50ms = 60秒)
+
+// Preferences存储方案
+Preferences preferences;
+
+// 自动校准参数
+bool isCalibrated = false;
+int adaptiveChangeThreshold = 50; // 自适应变化阈值
+
+// 分贝估算相关参数
+const float MIN_DB = 30.0;              // 最小分贝值 (环境静音)
+const float MAX_DB = 120.0;             // 最大分贝值 (很响)
+const float DB_RANGE = MAX_DB - MIN_DB; // 分贝范围
+
+// 分贝计算参数 - 根据 HW181-MIC 模块特性调整
+const float DB_BASELINE = 35.0;       // 基线分贝值 (环境安静时)
+const float DB_SENSITIVITY = 25.0;    // 分贝灵敏度系数
+const float VOLTAGE_THRESHOLD = 0.01; // 最小有效电压
+
+// 分贝平滑滤波
+float lastDbValue = MIN_DB;
+const float DB_SMOOTH_FACTOR = 0.7; // 平滑系数 (0-1)，提高灵敏度
+
+// 分贝统计
+float maxDbInPeriod = MIN_DB;
+float minDbInPeriod = MAX_DB;
+float avgDbSum = 0;
+int dbSampleCount = 0;
+
+// 分贝调试参数
+bool enableDbDebug = true; // 启用详细分贝调试
+unsigned long lastDbDebugTime = 0;
+const unsigned long DB_DEBUG_INTERVAL = 2000; // 每2秒输出详细调试信息
+
+// 函数声明
+void initNVS();
+void initPreferences();
+void loadCalibrationData();
+void saveCalibrationData(int baseline, int threshold);
+void performOneMinuteCalibration();
+float calculateDecibels(int analogValue, float voltage);
+float smoothDecibels(float currentDb, float lastDb, float smoothFactor);
+void updateDecibelStatistics(float dbValue);
+void printDecibelStatistics();
+
+void setup()
+{
+  // 初始化串口
+  Serial.begin(115200);
+  while (!Serial)
+  {
+    delay(10);
+  }
+
+  Serial.println("======================================");
+  Serial.println("HW181-MC 分贝检测模块测试程序 (模拟读取)");
+  Serial.println("======================================");
+  Serial.println("连接信息:");
+  Serial.println("- 模拟输出: GPIO1");
+  Serial.println("- VCC: 5V");
+  Serial.println("- GND: GND");
+  Serial.println("======================================");
+
+  // 模拟输入引脚不需要额外配置
+  Serial.println("初始化完成，开始测试...");
+  Serial.println("请制造一些声音来测试传感器!");
+  Serial.println();
+
+  delay(2000);
+
+  // 初始化NVS
+  initNVS();
+
+  // 初始化Preferences存储
+  initPreferences();
+
+  // 检查是否需要校准
+  if (!isCalibrated)
+  {
+    Serial.println("\n🔧 检测到首次使用，开始自动校准...");
+    Serial.println("请保持环境安静，校准将持续1分钟");
+    Serial.println("校准过程中请不要制造声音");
+    delay(3000); // 给用户准备时间
+
+    performOneMinuteCalibration();
+  }
+}
+
+void loop()
+{
+  unsigned long currentTime = millis();
+
+  // 每100ms读取一次传感器数据
+  if (currentTime - lastReadTime >= READ_INTERVAL)
+  {
+    lastReadTime = currentTime;
+    totalReadings++;
+
+    // 读取模拟输出 (声音信号强度)
+    int analogValue = analogRead(SOUND_SENSOR_ANALOG_PIN);
+    float voltage = adcToVoltage(analogValue);
+
+    // 计算分贝值
+    float currentDb = calculateDecibels(analogValue, voltage);
+    float smoothedDb = smoothDecibels(currentDb, lastDbValue, DB_SMOOTH_FACTOR);
+    lastDbValue = smoothedDb;
+
+    // 更新分贝统计
+    updateDecibelStatistics(smoothedDb);
+
+    // 计算与上一次读数的变化量
+    int change = abs(analogValue - lastAnalogValue);
+    bool soundDetected = (change > adaptiveChangeThreshold);
+
+    if (soundDetected)
+    {
+      soundDetectedCount++;
+      Serial.print("🔊 声音检测! ");
+    }
+    else
+    {
+      Serial.print("🔇 静音状态  ");
+    }
+
+    // 输出详细信息 (包含分贝)
+    Serial.print("模拟值: ");
+    Serial.print(analogValue);
+    Serial.print(" (");
+    Serial.print(voltage, 3); // 显示3位小数
+    Serial.print("V) | ");
+    Serial.print(smoothedDb, 1);
+    Serial.print("dB | 变化: ");
+    Serial.print(change);
+    Serial.print(" | 阈值: ");
+    Serial.print(adaptiveChangeThreshold);
+    Serial.print(" | 计数: ");
+    Serial.print(soundDetectedCount);
+    Serial.print("/");
+    Serial.println(totalReadings);
+
+    // 更新上一次的值
+    lastAnalogValue = analogValue;
+
+    // 分贝调试输出 (每2秒)
+    if (enableDbDebug && (currentTime - lastDbDebugTime >= DB_DEBUG_INTERVAL))
+    {
+      lastDbDebugTime = currentTime;
+
+      Serial.println();
+      Serial.println("=== 分贝计算调试信息 ===");
+      Serial.print("原始模拟值: ");
+      Serial.print(analogValue);
+      Serial.print(" | 基线值: ");
+      Serial.println(baselineValue);
+
+      float baselineVoltage = adcToVoltage(baselineValue);
+      Serial.print("当前电压: ");
+      Serial.print(voltage, 4);
+      Serial.print("V | 基线电压: ");
+      Serial.print(baselineVoltage, 4);
+      Serial.println("V");
+
+      Serial.print("电压比值: ");
+      Serial.print(voltage / max(baselineVoltage, (float)0.001), 3);
+      Serial.print(" | 模拟值比值: ");
+      Serial.println((float)analogValue / max(baselineValue, 1), 3);
+
+      Serial.print("信号变化: ");
+      Serial.print(abs(analogValue - lastAnalogValue));
+      Serial.print(" | 变化阈值: ");
+      Serial.println(adaptiveChangeThreshold);
+
+      Serial.print("计算分贝: ");
+      Serial.print(currentDb, 2);
+      Serial.print(" | 平滑分贝: ");
+      Serial.println(smoothedDb, 2);
+      Serial.println("========================");
+    }
+
+    // 每10秒输出统计信息
+    if (totalReadings % 100 == 0)
+    {
+      Serial.println();
+      Serial.println("--- 统计信息 ---");
+      Serial.print("总检测次数: ");
+      Serial.println(totalReadings);
+      Serial.print("声音检测次数: ");
+      Serial.println(soundDetectedCount);
+      Serial.print("检测率: ");
+      Serial.print((float)soundDetectedCount / totalReadings * 100, 2);
+      Serial.println("%");
+
+      // 输出当前模拟值范围分析
+      Serial.print("当前模拟值: ");
+      Serial.print(analogValue);
+      Serial.print(" (");
+      Serial.print(voltage, 3);
+      Serial.print("V, 范围: 0-4095 / 0-3.3V)");
+      Serial.println();
+
+      // 输出分贝统计
+      printDecibelStatistics();
+
+      // 模块状态诊断
+      if (soundDetectedCount == 0)
+      {
+        Serial.println("⚠️  警告: 未检测到任何声音变化!");
+        Serial.println("   请检查:");
+        Serial.println("   1. 连线是否正确");
+        Serial.println("   2. 模块供电是否正常");
+        Serial.println("   3. 模块灵敏度设置");
+        Serial.println("   4. 变化阈值是否合适");
+      }
+      else if (soundDetectedCount == totalReadings)
+      {
+        Serial.println("⚠️  警告: 持续检测到信号变化!");
+        Serial.println("   可能原因:");
+        Serial.println("   1. 环境噪音过大");
+        Serial.println("   2. 模块灵敏度过高");
+        Serial.println("   3. 变化阈值设置过低");
+        Serial.println("   4. 信号不稳定");
+      }
+      else
+      {
+        Serial.println("✅ 模块工作正常!");
+      }
+      Serial.println("==================");
+      Serial.println();
+    }
+  }
+
+  // 非阻塞延迟
+  delay(10);
+}
+
+// 初始化NVS
+void initNVS()
+{
+  Serial.println("正在初始化NVS存储系统...");
+
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+  {
+    // NVS分区被截断，需要擦除
+    Serial.println("NVS分区损坏，正在重新初始化...");
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    err = nvs_flash_init();
+  }
+
+  if (err == ESP_OK)
+  {
+    Serial.println("✅ NVS存储系统初始化成功");
+  }
+  else
+  {
+    Serial.print("❌ NVS存储系统初始化失败，错误代码: ");
+    Serial.println(err);
+    Serial.println("将使用内存存储（数据将在重启后丢失）");
+  }
+}
+
+// 执行一分钟校准
+void performOneMinuteCalibration()
+{
+  Serial.println("\n🕐 开始1分钟基准校准...");
+
+  calibrationMode = true;
+  int totalSum = 0;
+  int totalVariation = 0;
+  int lastVal = analogRead(SOUND_SENSOR_ANALOG_PIN);
+  calibrationCount = 0;
+
+  unsigned long startTime = millis();
+  unsigned long nextPrintTime = startTime + 10000; // 每10秒打印进度
+
+  // 采集1分钟的数据
+  while (calibrationCount < CALIBRATION_SAMPLES)
+  {
+    delay(50); // 每50ms采集一次
+    int analogVal = analogRead(SOUND_SENSOR_ANALOG_PIN);
+
+    // 计算基线值
+    totalSum += analogVal;
+
+    // 计算信号变化
+    int variation = abs(analogVal - lastVal);
+    totalVariation += variation;
+    lastVal = analogVal;
+
+    calibrationCount++;
+
+    // 打印进度
+    unsigned long currentTime = millis();
+    if (currentTime >= nextPrintTime)
+    {
+      int progress = (calibrationCount * 100) / CALIBRATION_SAMPLES;
+      Serial.print("校准进度: ");
+      Serial.print(progress);
+      Serial.print("% (");
+      Serial.print(calibrationCount);
+      Serial.print("/");
+      Serial.print(CALIBRATION_SAMPLES);
+      Serial.println(")");
+      nextPrintTime += 10000; // 下一个10秒
+    }
+  }
+
+  // 计算校准结果
+  baselineValue = totalSum / CALIBRATION_SAMPLES;
+  int avgVariation = totalVariation / CALIBRATION_SAMPLES;
+  adaptiveChangeThreshold = max(avgVariation * 3, 30); // 至少30的阈值
+
+  float baselineVoltage = adcToVoltage(baselineValue);
+  float thresholdVoltage = adcToVoltage(adaptiveChangeThreshold);
+
+  // 计算基线分贝
+  float baselineDb = calculateDecibels(baselineValue, baselineVoltage);
+
+  Serial.println("\n✅ 校准完成!");
+  Serial.print("基线值: ");
+  Serial.print(baselineValue);
+  Serial.print(" (");
+  Serial.print(baselineVoltage, 3);
+  Serial.print("V, ");
+  Serial.print(baselineDb, 1);
+  Serial.println("dB)");
+  Serial.print("平均变化: ");
+  Serial.println(avgVariation);
+  Serial.print("自适应阈值: ");
+  Serial.print(adaptiveChangeThreshold);
+  Serial.print(" (");
+  Serial.print(thresholdVoltage, 3);
+  Serial.println("V)");
+
+  // 保存校准数据
+  saveCalibrationData(baselineValue, adaptiveChangeThreshold);
+
+  isCalibrated = true;
+  calibrationMode = false;
+
+  Serial.println("校准数据已保存，系统准备就绪!");
+  Serial.println("======================================");
+}
+
+// Preferences初始化
+void initPreferences()
+{
+  Serial.println("正在初始化Preferences存储...");
+
+  // 测试Preferences是否可用
+  bool prefsOK = false;
+  if (preferences.begin("hw181_test", false))
+  {
+    preferences.putString("test", "ok");
+    String testResult = preferences.getString("test", "");
+    preferences.end();
+
+    if (testResult == "ok")
+    {
+      Serial.println("✅ Preferences存储初始化成功");
+      prefsOK = true;
+    }
+  }
+
+  if (!prefsOK)
+  {
+    Serial.println("❌ Preferences存储初始化失败，将使用内存存储");
+    Serial.println("   注意: 校准数据将在重启后丢失");
+  }
+
+  // 加载校准数据
+  loadCalibrationData();
+}
+
+// 保存校准数据到Preferences
+void saveCalibrationData(int baseline, int threshold)
+{
+  Serial.println("正在保存校准数据到Preferences...");
+
+  if (preferences.begin("hw181_calib", false))
+  {
+    preferences.putInt("baseline", baseline);
+    preferences.putInt("threshold", threshold);
+    preferences.end();
+    Serial.println("✅ 校准数据已保存到Preferences");
+  }
+  else
+  {
+    Serial.println("❌ 无法保存校准数据到Preferences");
+    Serial.println("   校准数据将保存在内存中（重启后丢失）");
+  }
+}
+
+// 从Preferences加载校准数据
+void loadCalibrationData()
+{
+  if (preferences.begin("hw181_calib", true))
+  { // 只读模式
+
+    if (preferences.isKey("baseline") && preferences.isKey("threshold"))
+    {
+      baselineValue = preferences.getInt("baseline", 0);
+      adaptiveChangeThreshold = preferences.getInt("threshold", 50);
+
+      Serial.println("📁 发现校准数据，正在加载...");
+      Serial.print("✅ 校准数据加载完成 - 基线值: ");
+      Serial.print(baselineValue);
+      Serial.print(", 阈值: ");
+      Serial.println(adaptiveChangeThreshold);
+      isCalibrated = true;
+    }
+    else
+    {
+      Serial.println("📁 未发现校准数据，需要进行首次校准");
+    }
+
+    preferences.end();
+  }
+  else
+  {
+    Serial.println("📁 无法访问Preferences存储，将使用默认设置");
+    Serial.println("   需要进行首次校准");
+  }
+}
+
+// 计算分贝值
+float calculateDecibels(int analogValue, float voltage)
+{
+  // 改进的分贝计算算法
+
+  // 防止除零
+  if (voltage < VOLTAGE_THRESHOLD)
+    voltage = VOLTAGE_THRESHOLD;
+
+  // 方法1: 基于电压变化的分贝计算
+  // 使用相对于基线电压的变化来计算分贝增量
+  float baselineVoltage = adcToVoltage(baselineValue);
+  if (baselineVoltage < VOLTAGE_THRESHOLD)
+    baselineVoltage = VOLTAGE_THRESHOLD;
+
+  // 计算电压比值
+  float voltageRatio = voltage / baselineVoltage;
+
+  // 使用对数公式: dB = 基线dB + 20 * log10(V_current / V_baseline)
+  float dbFromVoltage = DB_BASELINE + 20.0 * log10(voltageRatio);
+
+  // 方法2: 基于模拟值变化的线性映射
+  float analogRatio = (float)analogValue / (float)max(baselineValue, 1);
+  float dbFromAnalog = DB_BASELINE + DB_SENSITIVITY * (analogRatio - 1.0);
+
+  // 方法3: 基于信号变化量的快速响应
+  int currentChange = abs(analogValue - lastAnalogValue);
+  float changeBoost = 0;
+  if (currentChange > adaptiveChangeThreshold)
+  {
+    // 当检测到明显变化时，增加分贝响应
+    changeBoost = 10.0 * (float)currentChange / (float)max(adaptiveChangeThreshold, 1);
+    if (changeBoost > 30.0)
+      changeBoost = 30.0; // 限制最大增幅
+  }
+
+  // 结合三种方法
+  float calculatedDb = dbFromVoltage * 0.4 + dbFromAnalog * 0.4 + changeBoost * 0.2;
+
+  // 限制范围
+  if (calculatedDb < MIN_DB)
+    calculatedDb = MIN_DB;
+  if (calculatedDb > MAX_DB)
+    calculatedDb = MAX_DB;
+
+  return calculatedDb;
+}
+
+// 平滑分贝值 (减少跳跃但保持敏感性)
+float smoothDecibels(float currentDb, float lastDb, float smoothFactor)
+{
+  // 如果变化很大，减少平滑以保持敏感性
+  float dbDifference = abs(currentDb - lastDb);
+
+  if (dbDifference > 5.0)
+  {
+    // 大变化时，使用更高的响应度
+    smoothFactor = min(smoothFactor + 0.3, 1.0);
+  }
+  else if (dbDifference < 1.0)
+  {
+    // 小变化时，使用更多平滑
+    smoothFactor = smoothFactor * 0.5;
+  }
+
+  return lastDb + smoothFactor * (currentDb - lastDb);
+}
+
+// 更新分贝统计
+void updateDecibelStatistics(float dbValue)
+{
+  if (dbValue > maxDbInPeriod)
+    maxDbInPeriod = dbValue;
+  if (dbValue < minDbInPeriod)
+    minDbInPeriod = dbValue;
+
+  avgDbSum += dbValue;
+  dbSampleCount++;
+}
+
+// 打印分贝统计信息
+void printDecibelStatistics()
+{
+  if (dbSampleCount > 0)
+  {
+    float avgDb = avgDbSum / dbSampleCount;
+
+    Serial.print("📊 分贝统计 - 平均: ");
+    Serial.print(avgDb, 1);
+    Serial.print("dB | 最大: ");
+    Serial.print(maxDbInPeriod, 1);
+    Serial.print("dB | 最小: ");
+    Serial.print(minDbInPeriod, 1);
+    Serial.println("dB");
+
+    // 根据分贝级别给出评估
+    if (avgDb < 40)
+    {
+      Serial.println("🔇 环境: 很安静 (图书馆级别)");
+    }
+    else if (avgDb < 50)
+    {
+      Serial.println("🏠 环境: 安静 (住宅区)");
+    }
+    else if (avgDb < 60)
+    {
+      Serial.println("🏢 环境: 正常 (办公室)");
+    }
+    else if (avgDb < 70)
+    {
+      Serial.println("🚗 环境: 稍嘈杂 (街道)");
+    }
+    else if (avgDb < 80)
+    {
+      Serial.println("📢 环境: 嘈杂 (繁忙街道)");
+    }
+    else if (avgDb < 90)
+    {
+      Serial.println("🚧 环境: 很嘈杂 (施工现场)");
+    }
+    else
+    {
+      Serial.println("⚠️ 环境: 极嘈杂 (可能损害听力)");
+    }
+
+    // 重置统计
+    maxDbInPeriod = MIN_DB;
+    minDbInPeriod = MAX_DB;
+    avgDbSum = 0;
+    dbSampleCount = 0;
+  }
+}
