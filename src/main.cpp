@@ -111,6 +111,36 @@ void loop() {
       Serial.println("⚠️ MQ135传感器已禁用");
 #endif
     }
+    else if (command.equals("mic_cal") || command.equals("mcal")) {
+#if ENABLE_HW181_MIC
+      Serial.println("开始HW181-MIC传感器校准...");
+      sensorManager.calibrateHW181MIC();
+#else
+      Serial.println("⚠️ HW181-MIC传感器已禁用");
+#endif
+    }
+    else if (command.equals("show_mic") || command.equals("mic")) {
+#if ENABLE_HW181_MIC
+      sensorManager.showMicData();
+#else
+      Serial.println("⚠️ HW181-MIC传感器已禁用");
+#endif
+    }
+    else if (command.equals("mic_status") || command.equals("mstatus")) {
+#if ENABLE_HW181_MIC
+      sensorManager.showMicCalibrationStatus();
+#else
+      Serial.println("⚠️ HW181-MIC传感器已禁用");
+#endif
+    }
+    else if (command.equals("delete_mic_cal") || command.equals("dmic")) {
+#if ENABLE_HW181_MIC
+      sensorManager.deleteMicCalibration();
+      Serial.println("请重启设备以重新校准");
+#else
+      Serial.println("⚠️ HW181-MIC传感器已禁用");
+#endif
+    }
     else if (command.equals("help")) {
       Serial.println("=== 可用命令 ===");
       Serial.println("calibrate 或 cal - 开始校准MQ135传感器");
@@ -118,6 +148,10 @@ void loop() {
       Serial.println("show_cal 或 show - 显示当前保存的校准值");
       Serial.println("show_tvoc 或 tvoc - 显示21VOC传感器数据");
       Serial.println("cal_status 或 status - 显示校准状态");
+      Serial.println("mic_cal 或 mcal - 开始HW181-MIC传感器校准");
+      Serial.println("show_mic 或 mic - 显示HW181-MIC传感器数据");
+      Serial.println("mic_status 或 mstatus - 显示HW181-MIC校准状态");
+      Serial.println("delete_mic_cal 或 dmic - 删除HW181-MIC校准数据");
       Serial.println("debug_tvoc 或 debug - 调试21VOC传感器");
       Serial.println("test_tvoc 或 test - 测试21VOC传感器连接");
       Serial.println("wifi_status - 显示WiFi状态");

@@ -31,6 +31,29 @@ SensorManager::SensorManager()
   rZeroSum = 0;
   tempSensorPtr = nullptr;
 #endif
+
+#if ENABLE_HW181_MIC
+  mic_calibrated = false;
+  mic_baseline_value = 0;
+  mic_change_threshold = 50;
+  last_db_value = MIN_DB;
+  last_analog_value = 0;
+  min_db_in_period = MAX_DB;
+  avg_db_sum = 0;
+  db_sample_count = 0;
+  sound_detected_count = 0;
+  total_readings = 0;
+  lastMicReading.valid = false;
+  lastMicReading.timestamp = 0;
+  
+  // 初始化声音检测改进算法相关变量
+  recent_values_index = 0;
+  consecutive_sound_count = 0;
+  baseline_moving_avg = 0.0;
+  for (int i = 0; i < SOUND_DETECTION_WINDOW; i++) {
+    recent_analog_values[i] = 0;
+  }
+#endif
 }
 
 // 析构函数
@@ -225,6 +248,10 @@ bool SensorManager::initAllSensors() {
 #if ENABLE_MQ135
   success &= initMQ135();
 #endif
+
+#if ENABLE_HW181_MIC
+  success &= initHW181MIC();
+#endif
   
   return success;
 }
@@ -266,6 +293,11 @@ SensorData SensorManager::readAllSensors() {
     data.air_quality_ppm = mq135_sensor_ptr->getPPM();
     data.air_quality_corrected_ppm = mq135_sensor_ptr->getCorrectedPPM(ambient_temperature, ambient_humidity);
   }
+#endif
+
+#if ENABLE_HW181_MIC
+  // 读取HW181-MIC传感器数据
+  readHW181MICSensor(data.mic_data);
 #endif
 
 #if ENABLE_21VOC
@@ -751,6 +783,72 @@ void SensorManager::processCalibration() {
 #endif
 }
 
+// 自动校准HW181-MIC传感器（快速版本）
+bool SensorManager::performAutoMicCalibration() {
+  Serial.println("=== 开始HW181-MIC自动校准 ===");
+  Serial.println("📊 正在采集基线数据，请稍候...");
+  
+  int totalSum = 0;
+  int totalVariation = 0;
+  int lastVal = analogRead(MIC_ANALOG_PIN);
+  int sampleCount = 0;
+  const int AUTO_CALIBRATION_SAMPLES = 300; // 减少到15秒（300*50ms）
+  
+  unsigned long startTime = millis();
+  
+  // 采集15秒数据进行快速校准
+  while (sampleCount < AUTO_CALIBRATION_SAMPLES) {
+    delay(50); // 每50ms采集一次
+    int analogVal = analogRead(MIC_ANALOG_PIN);
+    
+    totalSum += analogVal;
+    int variation = abs(analogVal - lastVal);
+    totalVariation += variation;
+    lastVal = analogVal;
+    sampleCount++;
+    
+    // 每5秒打印一次进度
+    if (sampleCount % 100 == 0) {
+      int progress = (sampleCount * 100) / AUTO_CALIBRATION_SAMPLES;
+      Serial.print("📈 自动校准进度: ");
+      Serial.print(progress);
+      Serial.println("%");
+    }
+  }
+  
+  // 计算校准结果
+  mic_baseline_value = totalSum / AUTO_CALIBRATION_SAMPLES;
+  int avgVariation = totalVariation / AUTO_CALIBRATION_SAMPLES;
+  mic_change_threshold = max(avgVariation * 3, 30);
+  
+  float baselineVoltage = adcToVoltage(mic_baseline_value);
+  
+  Serial.println("✅ 自动校准完成!");
+  Serial.print("📊 基线值: ");
+  Serial.print(mic_baseline_value);
+  Serial.print(" (");
+  Serial.print(baselineVoltage, 3);
+  Serial.println("V)");
+  Serial.print("🎚️ 变化阈值: ");
+  Serial.println(mic_change_threshold);
+  
+  // 验证校准结果的合理性
+  if (mic_baseline_value < 100 || mic_baseline_value > 4000) {
+    Serial.println("⚠️ 校准结果异常，基线值不在合理范围内");
+    Serial.println("💡 建议检查传感器连接或使用 'mic_cal' 进行手动校准");
+    return false;
+  }
+  
+  // 保存校准数据
+  saveMicCalibrationData(mic_baseline_value, mic_change_threshold);
+  mic_calibrated = true;
+  
+  Serial.println("💾 校准数据已保存到Flash存储器");
+  Serial.println("🔊 传感器现在可以正常检测声音分贝");
+  
+  return true;
+}
+
 // Preferences相关方法实现
 bool SensorManager::initPreferences() {
 #if ENABLE_MQ135
@@ -1011,3 +1109,469 @@ const TVOCData& SensorManager::getLastTVOCReading() const {
   return emptyData;
 #endif
 }
+
+const MicData& SensorManager::getLastMicReading() const {
+#if ENABLE_HW181_MIC
+  return lastMicReading;
+#else
+  static MicData emptyData = {0.0, 0.0, 0, false, 0.0, 0.0, 0.0, false, false, 0};
+  return emptyData;
+#endif
+}
+
+#if ENABLE_HW181_MIC
+// HW181-MIC传感器初始化
+bool SensorManager::initHW181MIC() {
+  Serial.println("=== 初始化HW181-MIC分贝检测模块 ===");
+  Serial.println("引脚配置: GPIO" + String(MIC_ANALOG_PIN) + " (模拟输入)");
+  
+  // 加载校准数据
+  loadMicCalibrationData();
+  
+  if (!mic_calibrated) {
+    Serial.println("⚠️ HW181-MIC传感器未校准，开始自动校准...");
+    Serial.println("💡 请保持环境相对安静，校准将自动进行");
+    
+    // 执行自动校准
+    if (performAutoMicCalibration()) {
+      Serial.println("🎉 HW181-MIC传感器自动校准成功！");
+    } else {
+      Serial.println("❌ HW181-MIC传感器自动校准失败，可使用 'mic_cal' 手动校准");
+    }
+  } else {
+    Serial.println("✅ HW181-MIC传感器已校准，基线值: " + String(mic_baseline_value));
+  }
+  
+  // 初始化数据结构
+  lastMicReading.valid = false;
+  lastMicReading.calibrated = mic_calibrated;
+  lastMicReading.timestamp = millis();
+  
+  return true;
+}
+
+// 读取HW181-MIC传感器数据
+bool SensorManager::readHW181MICSensor(MicData &data) {
+  // 读取模拟值
+  int analogValue = analogRead(MIC_ANALOG_PIN);
+  float voltage = adcToVoltage(analogValue);
+  
+  // 计算分贝值
+  float currentDb = calculateDecibels(analogValue, voltage);
+  float smoothedDb = smoothDecibels(currentDb, last_db_value, DB_SMOOTH_FACTOR);
+  last_db_value = smoothedDb;
+  
+  // 使用改进的声音检测算法
+  bool soundDetected = detectSoundImproved(analogValue);
+  
+  if (soundDetected) {
+    sound_detected_count++;
+  }
+  total_readings++;
+  
+  // 更新统计
+  updateDecibelStatistics(smoothedDb);
+  
+  // 填充数据结构
+  data.decibels = smoothedDb;
+  data.sound_voltage = voltage;
+  data.analog_value = analogValue;
+  data.sound_detected = soundDetected;
+  data.min_db = min_db_in_period;
+  data.avg_db = (db_sample_count > 0) ? (avg_db_sum / db_sample_count) : MIN_DB;
+  data.calibrated = mic_calibrated;
+  data.valid = true;
+  data.timestamp = millis();
+  
+  // 保存到内部变量
+  lastMicReading = data;
+  last_analog_value = analogValue;
+  
+  return true;
+}
+
+// ADC值转电压
+float SensorManager::adcToVoltage(int adcValue) {
+  return (adcValue * ADC_REF_VOLTAGE) / ADC_RESOLUTION;
+}
+
+// 计算分贝值
+float SensorManager::calculateDecibels(int analogValue, float voltage) {
+  if (voltage < VOLTAGE_THRESHOLD) voltage = VOLTAGE_THRESHOLD;
+  
+  // 基于校准基线的分贝计算
+  float baselineVoltage = adcToVoltage(mic_baseline_value);
+  if (baselineVoltage < VOLTAGE_THRESHOLD) baselineVoltage = VOLTAGE_THRESHOLD;
+  
+  // 使用电压比值计算分贝增量
+  float voltageRatio = voltage / baselineVoltage;
+  float dbFromVoltage = DB_BASELINE + 20.0 * log10(voltageRatio);
+  
+  // 基于模拟值变化的线性映射
+  float analogRatio = (float)analogValue / (float)max(mic_baseline_value, 1);
+  float dbFromAnalog = DB_BASELINE + DB_SENSITIVITY * (analogRatio - 1.0);
+  
+  // 基于信号变化量的快速响应
+  int currentChange = abs(analogValue - last_analog_value);
+  float changeBoost = 0;
+  if (currentChange > mic_change_threshold) {
+    changeBoost = 10.0 * (float)currentChange / (float)max(mic_change_threshold, 1);
+    if (changeBoost > 30.0) changeBoost = 30.0;
+  }
+  
+  // 结合计算结果
+  float calculatedDb = dbFromVoltage * 0.4 + dbFromAnalog * 0.4 + changeBoost * 0.2;
+  
+  // 限制范围
+  if (calculatedDb < MIN_DB) calculatedDb = MIN_DB;
+  if (calculatedDb > MAX_DB) calculatedDb = MAX_DB;
+  
+  return calculatedDb;
+}
+
+// 平滑分贝值
+float SensorManager::smoothDecibels(float currentDb, float lastDb, float smoothFactor) {
+  float dbDifference = abs(currentDb - lastDb);
+  
+  if (dbDifference > 5.0) {
+    // 大变化时，使用更高的响应度
+    smoothFactor = min(smoothFactor + 0.3, 1.0);
+  } else if (dbDifference < 1.0) {
+    // 小变化时，使用更多平滑
+    smoothFactor = smoothFactor * 0.5;
+  }
+  
+  return lastDb + smoothFactor * (currentDb - lastDb);
+}
+
+// 更新分贝统计
+void SensorManager::updateDecibelStatistics(float dbValue) {
+  if (dbValue < min_db_in_period) min_db_in_period = dbValue;
+  
+  avg_db_sum += dbValue;
+  db_sample_count++;
+}
+
+// 执行MIC校准
+bool SensorManager::performMicCalibration() {
+  Serial.println("=== 开始HW181-MIC校准 ===");
+  Serial.println("请保持环境安静，校准将持续60秒...");
+  delay(3000);
+  
+  int totalSum = 0;
+  int totalVariation = 0;
+  int lastVal = analogRead(MIC_ANALOG_PIN);
+  int sampleCount = 0;
+  
+  unsigned long startTime = millis();
+  unsigned long nextPrintTime = startTime + 10000;
+  
+  // 采集60秒数据
+  while (sampleCount < CALIBRATION_SAMPLES) {
+    delay(50); // 每50ms采集一次
+    int analogVal = analogRead(MIC_ANALOG_PIN);
+    
+    totalSum += analogVal;
+    int variation = abs(analogVal - lastVal);
+    totalVariation += variation;
+    lastVal = analogVal;
+    sampleCount++;
+    
+    // 打印进度
+    unsigned long currentTime = millis();
+    if (currentTime >= nextPrintTime) {
+      int progress = (sampleCount * 100) / CALIBRATION_SAMPLES;
+      Serial.print("校准进度: ");
+      Serial.print(progress);
+      Serial.println("%");
+      nextPrintTime += 10000;
+    }
+  }
+  
+  // 计算校准结果
+  mic_baseline_value = totalSum / CALIBRATION_SAMPLES;
+  int avgVariation = totalVariation / CALIBRATION_SAMPLES;
+  mic_change_threshold = max(avgVariation * 3, 30);
+  
+  float baselineVoltage = adcToVoltage(mic_baseline_value);
+  
+  Serial.println("✅ 校准完成!");
+  Serial.print("基线值: ");
+  Serial.print(mic_baseline_value);
+  Serial.print(" (");
+  Serial.print(baselineVoltage, 3);
+  Serial.println("V)");
+  Serial.print("变化阈值: ");
+  Serial.println(mic_change_threshold);
+  
+  // 保存校准数据
+  saveMicCalibrationData(mic_baseline_value, mic_change_threshold);
+  mic_calibrated = true;
+  
+  return true;
+}
+
+// 加载MIC校准数据
+void SensorManager::loadMicCalibrationData() {
+  Serial.println("=== 加载HW181-MIC校准数据 ===");
+  
+  Preferences micPrefs;
+  bool dataLoaded = false;
+  
+  // 首先尝试从专用命名空间加载
+  if (micPrefs.begin("hw181_calib", true)) {
+    Serial.println("📁 专用命名空间访问成功");
+    
+    if (micPrefs.isKey("mic_baseline") && micPrefs.isKey("mic_threshold")) {
+      mic_baseline_value = micPrefs.getInt("mic_baseline", 0);
+      mic_change_threshold = micPrefs.getInt("mic_threshold", 50);
+      mic_calibrated = true;
+      dataLoaded = true;
+      
+      Serial.println("📁 从专用命名空间加载校准数据成功");
+      Serial.printf("基线值: %d, 阈值: %d\n", mic_baseline_value, mic_change_threshold);
+    } else {
+      Serial.println("📁 专用命名空间中未发现校准数据");
+    }
+    micPrefs.end();
+  } else {
+    Serial.println("📁 无法访问专用命名空间");
+  }
+  
+  // 如果专用命名空间没有数据，尝试从默认命名空间加载
+  if (!dataLoaded && micPrefs.begin("nvs", true)) {
+    Serial.println("📁 尝试从默认命名空间加载...");
+    
+    if (micPrefs.isKey("hw181_baseline") && micPrefs.isKey("hw181_threshold")) {
+      mic_baseline_value = micPrefs.getInt("hw181_baseline", 0);
+      mic_change_threshold = micPrefs.getInt("hw181_threshold", 50);
+      mic_calibrated = true;
+      dataLoaded = true;
+      
+      Serial.println("📁 从默认命名空间加载校准数据成功");
+      Serial.printf("基线值: %d, 阈值: %d\n", mic_baseline_value, mic_change_threshold);
+    } else {
+      Serial.println("📁 默认命名空间中也未发现校准数据");
+    }
+    micPrefs.end();
+  }
+  
+  if (!dataLoaded) {
+    Serial.println("📁 未发现任何HW181-MIC校准数据");
+    mic_calibrated = false;
+    mic_baseline_value = 0;
+    mic_change_threshold = 50;
+  }
+}
+
+// 保存MIC校准数据
+void SensorManager::saveMicCalibrationData(int baseline, int threshold) {
+  Serial.println("=== 保存HW181-MIC校准数据 ===");
+  
+  // 先尝试初始化Preferences
+  Preferences micPrefs;
+  if (micPrefs.begin("hw181_calib", false)) {
+    Serial.println("📁 Preferences命名空间初始化成功");
+    
+    size_t result1 = micPrefs.putInt("mic_baseline", baseline);
+    size_t result2 = micPrefs.putInt("mic_threshold", threshold);
+    
+    micPrefs.end();
+    
+    if (result1 > 0 && result2 > 0) {
+      Serial.println("✅ HW181-MIC校准数据已保存");
+      Serial.printf("保存的基线值: %d\n", baseline);
+      Serial.printf("保存的阈值: %d\n", threshold);
+    } else {
+      Serial.println("❌ 数据写入失败");
+      Serial.printf("基线值写入结果: %d字节\n", result1);
+      Serial.printf("阈值写入结果: %d字节\n", result2);
+    }
+  } else {
+    Serial.println("❌ 无法初始化Preferences命名空间");
+    Serial.println("💡 可能的原因:");
+    Serial.println("   1. Flash存储空间不足");
+    Serial.println("   2. 命名空间名称冲突");
+    Serial.println("   3. NVS分区损坏");
+    
+    // 尝试使用默认命名空间
+    Serial.println("🔧 尝试使用默认命名空间...");
+    if (micPrefs.begin("nvs", false)) {
+      size_t result1 = micPrefs.putInt("hw181_baseline", baseline);
+      size_t result2 = micPrefs.putInt("hw181_threshold", threshold);
+      micPrefs.end();
+      
+      if (result1 > 0 && result2 > 0) {
+        Serial.println("✅ 使用默认命名空间保存成功");
+      } else {
+        Serial.println("❌ 默认命名空间也保存失败");
+      }
+    } else {
+      Serial.println("❌ 默认命名空间也无法初始化");
+    }
+  }
+}
+
+// 公共方法实现
+void SensorManager::calibrateHW181MIC() {
+  performMicCalibration();
+}
+
+void SensorManager::showMicData() {
+  if (lastMicReading.valid) {
+    Serial.println("=== HW181-MIC传感器数据 ===");
+    Serial.print("分贝值: ");
+    Serial.print(lastMicReading.decibels, 1);
+    Serial.println(" dB");
+    Serial.print("电压: ");
+    Serial.print(lastMicReading.sound_voltage, 3);
+    Serial.println(" V");
+    Serial.print("模拟值: ");
+    Serial.println(lastMicReading.analog_value);
+    Serial.print("声音检测: ");
+    Serial.println(lastMicReading.sound_detected ? "是" : "否");
+    Serial.print("校准状态: ");
+    Serial.println(lastMicReading.calibrated ? "已校准" : "未校准");
+    
+    if (total_readings > 0) {
+      Serial.print("检测率: ");
+      Serial.print((float)sound_detected_count / total_readings * 100, 1);
+      Serial.println("%");
+    }
+    Serial.println("========================");
+  } else {
+    Serial.println("⚠️ 没有有效的HW181-MIC数据");
+  }
+}
+
+void SensorManager::showMicCalibrationStatus() {
+  Serial.print("HW181-MIC校准状态: ");
+  Serial.println(mic_calibrated ? "已校准" : "未校准");
+  
+  if (mic_calibrated) {
+    Serial.print("基线值: ");
+    Serial.print(mic_baseline_value);
+    Serial.print(" (");
+    Serial.print(adcToVoltage(mic_baseline_value), 3);
+    Serial.println("V)");
+    Serial.print("变化阈值: ");
+    Serial.println(mic_change_threshold);
+  } else {
+    Serial.println("请使用 'mic_cal' 命令进行校准");
+  }
+}
+
+void SensorManager::deleteMicCalibration() {
+  Serial.println("=== 删除HW181-MIC校准数据 ===");
+  
+  Preferences micPrefs;
+  bool deleted = false;
+  
+  // 从专用命名空间删除
+  if (micPrefs.begin("hw181_calib", false)) {
+    if (micPrefs.isKey("mic_baseline")) {
+      micPrefs.remove("mic_baseline");
+      deleted = true;
+    }
+    if (micPrefs.isKey("mic_threshold")) {
+      micPrefs.remove("mic_threshold");
+      deleted = true;
+    }
+    micPrefs.end();
+    
+    if (deleted) {
+      Serial.println("✅ 从专用命名空间删除校准数据成功");
+    }
+  }
+  
+  // 从默认命名空间删除
+  if (micPrefs.begin("nvs", false)) {
+    if (micPrefs.isKey("hw181_baseline")) {
+      micPrefs.remove("hw181_baseline");
+      deleted = true;
+    }
+    if (micPrefs.isKey("hw181_threshold")) {
+      micPrefs.remove("hw181_threshold");
+      deleted = true;
+    }
+    micPrefs.end();
+    
+    if (deleted) {
+      Serial.println("✅ 从默认命名空间删除校准数据成功");
+    }
+  }
+  
+  if (deleted) {
+    Serial.println("✅ HW181-MIC校准数据已删除");
+  } else {
+    Serial.println("⚠️ 未找到要删除的校准数据");
+  }
+  
+  mic_calibrated = false;
+  mic_baseline_value = 0;
+  mic_change_threshold = 50;
+  
+  // 重置声音检测算法状态
+  recent_values_index = 0;
+  consecutive_sound_count = 0;
+  baseline_moving_avg = 0.0;
+  for (int i = 0; i < SOUND_DETECTION_WINDOW; i++) {
+    recent_analog_values[i] = 0;
+  }
+}
+
+// HW181-MIC改进的声音检测算法
+bool SensorManager::detectSoundImproved(int current_analog_value) {
+  if (!mic_calibrated) {
+    return false;  // 未校准时不检测声音
+  }
+  
+  // 更新最近的读数缓冲区
+  updateRecentValues(current_analog_value);
+  
+  // 计算移动平均值
+  float current_moving_avg = calculateMovingAverage();
+  
+  // 第一次运行时初始化基线移动平均
+  if (baseline_moving_avg == 0.0) {
+    baseline_moving_avg = current_moving_avg;
+    return false;
+  }
+  
+  // 缓慢更新基线（适应环境噪声变化）
+  baseline_moving_avg = baseline_moving_avg * 0.95 + current_moving_avg * 0.05;
+  
+  // 计算相对于基线的变化
+  float deviation = abs(current_moving_avg - baseline_moving_avg);
+  
+  // 动态阈值：基于校准时设定的阈值，但考虑移动平均
+  float dynamic_threshold = mic_change_threshold * 0.7;  // 降低阈值敏感度
+  
+  // 检测是否超过阈值
+  bool current_detection = (deviation > dynamic_threshold);
+  
+  if (current_detection) {
+    consecutive_sound_count++;
+  } else {
+    consecutive_sound_count = max(0, consecutive_sound_count - 1);  // 缓慢衰减
+  }
+  
+  // 需要连续检测到才认为有声音
+  return (consecutive_sound_count >= MIN_CONSECUTIVE_DETECTIONS);
+}
+
+// 更新最近读数的循环缓冲区
+void SensorManager::updateRecentValues(int value) {
+  recent_analog_values[recent_values_index] = value;
+  recent_values_index = (recent_values_index + 1) % SOUND_DETECTION_WINDOW;
+}
+
+// 计算最近几次读数的移动平均
+float SensorManager::calculateMovingAverage() {
+  float sum = 0;
+  for (int i = 0; i < SOUND_DETECTION_WINDOW; i++) {
+    sum += recent_analog_values[i];
+  }
+  return sum / SOUND_DETECTION_WINDOW;
+}
+#endif

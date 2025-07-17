@@ -444,6 +444,21 @@ bool MQTTManager::publishSensorData(const SensorData& data) {
   }
 #endif
 
+#if ENABLE_HW181_MIC
+  // 添加HW181-MIC分贝检测数据（如果有效且已校准）
+  if (data.mic_data.valid && data.mic_data.calibrated) {
+    doc["params"]["decibels"]["value"] = data.mic_data.decibels;  // 浮点数
+    doc["params"]["decibels"]["time"] = timestamp;
+
+    doc["params"]["sound_detected"]["value"] = data.mic_data.sound_detected ? 1 : 0;  // 布尔值转整数
+    doc["params"]["sound_detected"]["time"] = timestamp;
+
+    doc["params"]["sound_voltage"]["value"] = data.mic_data.sound_voltage;  // 声音电压值（浮点数）
+    doc["params"]["sound_voltage"]["time"] = timestamp;
+
+  }
+#endif
+
   String payload;
   serializeJson(doc, payload);
 

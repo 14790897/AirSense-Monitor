@@ -21,6 +21,10 @@
 #define ENABLE_MQ135 1         // MQ135空气质量传感器 (ADC)
 #endif
 
+#ifndef ENABLE_HW181_MIC
+#define ENABLE_HW181_MIC 1     // HW181-MIC分贝检测模块 (ADC)
+#endif
+
 // ===== 条件包含头文件 =====
 #if ENABLE_BMP280
 #include <Adafruit_BMP280.h>
@@ -47,6 +51,19 @@ struct TVOCData {
   unsigned long timestamp; // 时间戳
 };
 
+// HW181-MIC传感器数据结构（即使禁用也需要定义用于接口兼容）
+struct MicData {
+  float decibels;          // 分贝值 (dB)
+  float sound_voltage;           // 电压值 (V)
+  int analog_value;        // 模拟值 (0-4095)
+  bool sound_detected;     // 是否检测到声音
+  float min_db;            // 期间最小分贝
+  float avg_db;            // 期间平均分贝
+  bool calibrated;         // 是否已校准
+  bool valid;              // 数据有效性
+  unsigned long timestamp; // 时间戳
+};
+
 // 传感器数据汇总结构
 struct SensorData {
 #if ENABLE_BMP280
@@ -66,6 +83,11 @@ struct SensorData {
 #if ENABLE_21VOC
   // 21VOC数据
   TVOCData tvoc_data;
+#endif
+
+#if ENABLE_HW181_MIC
+  // HW181-MIC数据
+  MicData mic_data;
 #endif
   
   // 时间戳
@@ -128,6 +150,43 @@ private:
   // Preferences对象
   Preferences preferences;
 #endif
+
+#if ENABLE_HW181_MIC
+  // HW181-MIC传感器配置
+  static const int MIC_ANALOG_PIN = 3;
+  static constexpr float ADC_REF_VOLTAGE = 3.3;
+  static const int ADC_RESOLUTION = 4096;
+  static constexpr float MIN_DB = 30.0;
+  static constexpr float MAX_DB = 120.0;
+  static constexpr float DB_BASELINE = 35.0;
+  static constexpr float DB_SENSITIVITY = 25.0;
+  static constexpr float VOLTAGE_THRESHOLD = 0.01;
+  static constexpr float DB_SMOOTH_FACTOR = 0.7;
+  static const int CALIBRATION_SAMPLES = 1200;
+  
+  // HW181-MIC传感器数据和状态
+  MicData lastMicReading;
+  bool mic_calibrated;
+  int mic_baseline_value;
+  int mic_change_threshold;
+  float last_db_value;
+  int last_analog_value;
+  
+  // 声音检测改进算法相关
+  static const int SOUND_DETECTION_WINDOW = 5;  // 检测窗口大小
+  int recent_analog_values[5];  // 最近几次读数（避免动态分配）
+  int recent_values_index;  // 循环缓冲区索引
+  int consecutive_sound_count;  // 连续检测到声音的次数
+  static const int MIN_CONSECUTIVE_DETECTIONS = 3;  // 至少连续检测到3次才认为有声音
+  float baseline_moving_avg;  // 基线移动平均
+  
+  // 分贝统计
+  float min_db_in_period;
+  float avg_db_sum;
+  int db_sample_count;
+  unsigned long sound_detected_count;
+  unsigned long total_readings;
+#endif
   
   // 内部方法
 #if ENABLE_MQ135
@@ -148,6 +207,19 @@ private:
   bool validate21VOCData(const TVOCData &data);
   void print21VOCReading(const TVOCData &data);
 #endif
+
+#if ENABLE_HW181_MIC
+  // HW181-MIC传感器方法
+  bool readHW181MICSensor(MicData &data);
+  float adcToVoltage(int adcValue);
+  float calculateDecibels(int analogValue, float voltage);
+  float smoothDecibels(float currentDb, float lastDb, float smoothFactor);
+  void updateDecibelStatistics(float dbValue);
+  bool performMicCalibration();
+  bool performAutoMicCalibration();  // 自动校准方法
+  void loadMicCalibrationData();
+  void saveMicCalibrationData(int baseline, int threshold);
+#endif
   
 public:
   SensorManager();
@@ -157,6 +229,7 @@ public:
   bool initBMP280();
   bool init21VOCSensor();
   bool initMQ135();
+  bool initHW181MIC();
   bool initAllSensors();
   
   // 数据读取方法
@@ -176,11 +249,26 @@ public:
   void test21VOCConnection();
   void show21VOCData();
   
+  // HW181-MIC相关
+  void calibrateHW181MIC();
+  void showMicData();
+  void showMicCalibrationStatus();
+  void deleteMicCalibration();
+  
+private:
+  // HW181-MIC声音检测算法辅助函数
+  bool detectSoundImproved(int current_analog_value);
+  void updateRecentValues(int value);
+  float calculateMovingAverage();
+  
+public:
+  
   // 获取环境参数
   float getAmbientTemperature() const;
   float getAmbientHumidity() const;
   bool isMQ135Calibrated() const;
   const TVOCData& getLastTVOCReading() const;
+  const MicData& getLastMicReading() const;
 };
 
 #endif // SENSORS_H
