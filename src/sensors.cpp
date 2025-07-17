@@ -1547,17 +1547,11 @@ bool SensorManager::detectSoundImproved(int current_analog_value) {
   // 动态阈值：基于校准时设定的阈值，但考虑移动平均
   float dynamic_threshold = mic_change_threshold * 0.7;  // 降低阈值敏感度
   
-  // 检测是否超过阈值
+  // 检测是否超过阈值 - 简化版本：一次超过就算检测到声音
   bool current_detection = (deviation > dynamic_threshold);
   
-  if (current_detection) {
-    consecutive_sound_count++;
-  } else {
-    consecutive_sound_count = max(0, consecutive_sound_count - 1);  // 缓慢衰减
-  }
-  
-  // 需要连续检测到才认为有声音
-  return (consecutive_sound_count >= MIN_CONSECUTIVE_DETECTIONS);
+  // 直接返回当前检测结果，不需要连续检测
+  return current_detection;
 }
 
 // 更新最近读数的循环缓冲区

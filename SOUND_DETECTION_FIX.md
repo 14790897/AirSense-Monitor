@@ -29,9 +29,11 @@
 - 实时跟踪环境噪声基线：`baseline_moving_avg`
 - 缓慢适应环境变化：`baseline_moving_avg = baseline_moving_avg * 0.95 + current_moving_avg * 0.05`
 
-### 3. 连续性检测
-- 需要连续3次检测到声音变化才认为有真正的声音
-- 防误报：`consecutive_sound_count >= MIN_CONSECUTIVE_DETECTIONS`
+### 3. 即时响应检测
+
+- **简化逻辑**：一次检测到声音变化就立即确认
+- **快速响应**：`current_detection = (deviation > dynamic_threshold)`
+- **无延迟**：不需要等待连续检测，提高响应速度
 
 ### 4. 动态阈值调整
 - 基于校准阈值动态调整：`dynamic_threshold = mic_change_threshold * 0.7`
@@ -44,7 +46,7 @@
 3. **更新基线**：缓慢跟踪环境噪声变化
 4. **计算偏差**：当前移动平均相对于基线的偏差
 5. **阈值比较**：偏差是否超过动态阈值
-6. **连续性检查**：需要连续3次超过阈值才确认有声音
+6. **即时确认**：一次超过阈值就确认有声音（响应更快）
 
 ## 核心代码
 
@@ -75,17 +77,11 @@ bool SensorManager::detectSoundImproved(int current_analog_value) {
   // 动态阈值：基于校准时设定的阈值，但考虑移动平均
   float dynamic_threshold = mic_change_threshold * 0.7;  // 降低阈值敏感度
   
-  // 检测是否超过阈值
+  // 检测是否超过阈值 - 简化版本：一次超过就算检测到声音
   bool current_detection = (deviation > dynamic_threshold);
   
-  if (current_detection) {
-    consecutive_sound_count++;
-  } else {
-    consecutive_sound_count = max(0, consecutive_sound_count - 1);  // 缓慢衰减
-  }
-  
-  // 需要连续检测到才认为有声音
-  return (consecutive_sound_count >= MIN_CONSECUTIVE_DETECTIONS);
+  // 直接返回当前检测结果，不需要连续检测
+  return current_detection;
 }
 ```
 
@@ -106,8 +102,8 @@ float baseline_moving_avg;  // 基线移动平均
 
 1. **抗噪声能力强**：移动平均算法有效滤除瞬时噪声
 2. **自适应环境**：动态基线跟踪适应环境噪声变化
-3. **减少误报**：连续性检测大大降低误报率
-4. **参数可调**：可以通过调整窗口大小、连续检测次数等参数优化性能
+3. **快速响应**：一次检测到就立即确认，响应速度快
+4. **参数可调**：可以通过调整窗口大小、阈值系数等参数优化性能
 
 ## 测试建议
 
@@ -121,7 +117,6 @@ float baseline_moving_avg;  // 基线移动平均
 如果需要进一步调优，可以调整以下参数：
 
 - `SOUND_DETECTION_WINDOW`：移动平均窗口大小（默认5）
-- `MIN_CONSECUTIVE_DETECTIONS`：连续检测次数（默认3）
 - `dynamic_threshold` 计算中的系数（默认0.7）
 - 基线更新速度系数（默认0.95和0.05）
 
