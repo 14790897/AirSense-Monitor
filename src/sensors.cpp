@@ -1317,7 +1317,7 @@ const MicData &SensorManager::getLastMicReading() const
 #if ENABLE_HW181_MIC
   return lastMicReading;
 #else
-  static MicData emptyData = {0.0, 0.0, 0, false, 0.0, 0.0, 0.0, false, false, 0};
+  static MicData emptyData = {0.0, 0.0, 0, false, 0.0, 0.0, false, false, 0};
   return emptyData;
 #endif
 }

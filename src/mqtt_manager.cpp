@@ -454,8 +454,8 @@ bool MQTTManager::publishSensorData(const SensorData& data) {
     doc["params"]["ch2o_ugm3"]["value"] = data.voc_co2_hcho_data.ch2o_mgm3;  // 甲醛浓度 (mg/m³)
     doc["params"]["ch2o_ugm3"]["time"] = timestamp;
 
-    doc["params"]["co2_ugm3"]["value"] = data.voc_co2_hcho_data.co2_mgm3;  // CO₂浓度 (mg/m³)
-    doc["params"]["co2_ugm3"]["time"] = timestamp;
+    doc["params"]["eco2_ppm"]["value"] = data.voc_co2_hcho_data.co2_mgm3;  // CO₂浓度 (mg/m³)
+    doc["params"]["eco2_ppm"]["time"] = timestamp;
   }
 #endif
 
