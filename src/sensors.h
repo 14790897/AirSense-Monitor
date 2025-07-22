@@ -17,6 +17,10 @@
 #define ENABLE_21VOC 1         // 21VOC五合一传感器 (UART)
 #endif
 
+#ifndef ENABLE_VOC_CO2_HCHO
+#define ENABLE_VOC_CO2_HCHO 1  // VOC-CO2-HCHO三合一传感器 (UART)
+#endif
+
 #ifndef ENABLE_MQ135
 #define ENABLE_MQ135 1         // MQ135空气质量传感器 (ADC)
 #endif
@@ -47,6 +51,15 @@ struct TVOCData {
   uint16_t eco2_ppm;      // eCO2浓度 (ppm)
   float temperature_c;    // 温度 (°C)
   float humidity_rh;      // 湿度 (%RH)
+  bool valid;             // 数据有效性
+  unsigned long timestamp; // 时间戳
+};
+
+// VOC-CO2-HCHO三合一传感器数据结构（即使禁用也需要定义用于接口兼容）
+struct VOCData {
+  float tvoc_mgm3;        // TVOC浓度 (mg/m3)
+  float ch2o_mgm3;        // 甲醛浓度 (mg/m3)
+  float co2_mgm3;         // CO₂浓度 (mg/m3)
   bool valid;             // 数据有效性
   unsigned long timestamp; // 时间戳
 };
@@ -83,6 +96,11 @@ struct SensorData {
 #if ENABLE_21VOC
   // 21VOC数据
   TVOCData tvoc_data;
+#endif
+
+#if ENABLE_VOC_CO2_HCHO
+  // VOC-CO2-HCHO数据
+  VOCData voc_co2_hcho_data;
 #endif
 
 #if ENABLE_HW181_MIC
@@ -122,7 +140,20 @@ private:
   unsigned long lastTVOCReadTime;
   static const unsigned long TVOC_READ_INTERVAL = 2000;
 #endif
-  
+
+#if ENABLE_VOC_CO2_HCHO
+  // VOC-CO2-HCHO传感器配置
+  static const int VOC_UART_RX_PIN = 1;
+  static const int VOC_UART_TX_PIN = 0;
+  static const int VOC_UART_BAUD_RATE = 9600;
+  HardwareSerial vocSensorSerial;
+
+  // VOC-CO2-HCHO传感器数据
+  VOCData lastVOCReading;
+  unsigned long lastVOCReadTime;
+  static const unsigned long VOC_READ_INTERVAL = 2000;
+#endif
+
 #if ENABLE_MQ135
   // MQ135传感器配置
   static const int MQ135_AO_PIN = 2;
@@ -208,6 +239,14 @@ private:
   void print21VOCReading(const TVOCData &data);
 #endif
 
+#if ENABLE_VOC_CO2_HCHO
+  // VOC-CO2-HCHO传感器方法
+  bool readVOCCO2HCHOSensor(VOCData &data);
+  void parseVOCCO2HCHOData(uint8_t* buffer, int length, VOCData &data);
+  bool validateVOCCO2HCHOData(const VOCData &data);
+  void printVOCCO2HCHOReading(const VOCData &data);
+#endif
+
 #if ENABLE_HW181_MIC
   // HW181-MIC传感器方法
   bool readHW181MICSensor(MicData &data);
@@ -228,6 +267,7 @@ public:
   // 初始化方法
   bool initBMP280();
   bool init21VOCSensor();
+  bool initVOCCO2HCHOSensor();
   bool initMQ135();
   bool initHW181MIC();
   bool initAllSensors();
@@ -235,6 +275,7 @@ public:
   // 数据读取方法
   SensorData readAllSensors();
   void update21VOCData(); // 定时更新21VOC数据
+  void updateVOCCO2HCHOData(); // 定时更新VOC-CO2-HCHO数据
   
   // MQ135校准相关
   void calibrateMQ135();
@@ -248,6 +289,11 @@ public:
   void debug21VOCSensor();
   void test21VOCConnection();
   void show21VOCData();
+
+  // VOC-CO2-HCHO调试相关
+  void debugVOCCO2HCHOSensor();
+  void testVOCCO2HCHOConnection();
+  void showVOCCO2HCHOData();
   
   // HW181-MIC相关
   void calibrateHW181MIC();
@@ -268,6 +314,7 @@ public:
   float getAmbientHumidity() const;
   bool isMQ135Calibrated() const;
   const TVOCData& getLastTVOCReading() const;
+  const VOCData& getLastVOCCO2HCHOReading() const;
   const MicData& getLastMicReading() const;
 };
 

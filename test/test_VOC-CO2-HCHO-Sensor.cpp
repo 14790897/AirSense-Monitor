@@ -1,5 +1,5 @@
 /**
- * @file main_VOC-CO2-HCHO-Sensor.cpp
+ * @file test_VOC-CO2-HCHO-Sensor.cpp
  * @brief 三合一传感器测试程序
  * @description 专门用于测试三合一传感器的独立程序
  *

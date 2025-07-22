@@ -56,6 +56,11 @@ void loop() {
   sensorManager.update21VOCData();
 #endif
 
+#if ENABLE_VOC_CO2_HCHO
+  // 定时更新VOC-CO2-HCHO传感器数据
+  sensorManager.updateVOCCO2HCHOData();
+#endif
+
   // 定时上传数据
   if (millis() - lastUploadTime >= UPLOAD_INTERVAL) {
     Serial.println("⏰ 到达上传时间间隔，开始读取传感器数据...");
@@ -104,6 +109,27 @@ void loop() {
       Serial.println("⚠️ 21VOC传感器已禁用");
 #endif
     }
+    else if (command.equals("show_voc") || command.equals("voc")) {
+#if ENABLE_VOC_CO2_HCHO
+      sensorManager.showVOCCO2HCHOData();
+#else
+      Serial.println("⚠️ VOC-CO2-HCHO传感器已禁用");
+#endif
+    }
+    else if (command.equals("debug_voc") || command.equals("dvoc")) {
+#if ENABLE_VOC_CO2_HCHO
+      sensorManager.debugVOCCO2HCHOSensor();
+#else
+      Serial.println("⚠️ VOC-CO2-HCHO传感器已禁用");
+#endif
+    }
+    else if (command.equals("test_voc") || command.equals("tvoc_test")) {
+#if ENABLE_VOC_CO2_HCHO
+      sensorManager.testVOCCO2HCHOConnection();
+#else
+      Serial.println("⚠️ VOC-CO2-HCHO传感器已禁用");
+#endif
+    }
     else if (command.equals("cal_status") || command.equals("status")) {
 #if ENABLE_MQ135
       sensorManager.showCalibrationStatus();
@@ -147,6 +173,9 @@ void loop() {
       Serial.println("delete_cal 或 del - 删除保存的校准值");
       Serial.println("show_cal 或 show - 显示当前保存的校准值");
       Serial.println("show_tvoc 或 tvoc - 显示21VOC传感器数据");
+      Serial.println("show_voc 或 voc - 显示VOC-CO2-HCHO传感器数据");
+      Serial.println("debug_voc 或 dvoc - 调试VOC-CO2-HCHO传感器");
+      Serial.println("test_voc 或 tvoc_test - 测试VOC-CO2-HCHO传感器连接");
       Serial.println("cal_status 或 status - 显示校准状态");
       Serial.println("mic_cal 或 mcal - 开始HW181-MIC传感器校准");
       Serial.println("show_mic 或 mic - 显示HW181-MIC传感器数据");
@@ -256,6 +285,18 @@ void readSensorData() {
     Serial.println("使用21VOC温湿度补偿MQ135");
   } else {
     Serial.println("21VOC: 无有效数据");
+  }
+#endif
+
+#if ENABLE_VOC_CO2_HCHO
+  // 显示VOC-CO2-HCHO传感器数据
+  if (data.voc_co2_hcho_data.valid) {
+    Serial.println("--- VOC-CO2-HCHO三合一传感器数据 ---");
+    Serial.printf("TVOC浓度: %.3f mg/m³\n", data.voc_co2_hcho_data.tvoc_mgm3);
+    Serial.printf("甲醛浓度: %.3f mg/m³\n", data.voc_co2_hcho_data.ch2o_mgm3);
+    Serial.printf("CO₂浓度: %.3f mg/m³\n", data.voc_co2_hcho_data.co2_mgm3);
+  } else {
+    Serial.println("VOC-CO2-HCHO: 无有效数据");
   }
 #endif
 

@@ -444,6 +444,21 @@ bool MQTTManager::publishSensorData(const SensorData& data) {
   }
 #endif
 
+#if ENABLE_VOC_CO2_HCHO
+  // 添加VOC-CO2-HCHO三合一传感器数据（如果有效）
+  if (data.voc_co2_hcho_data.valid) {
+    // 将mg/m³转换为μg/m³以保持与21VOC传感器的一致性
+    doc["params"]["voc_ugm3"]["value"] = data.voc_co2_hcho_data.tvoc_mgm3;  // TVOC浓度 (mg/m³)
+    doc["params"]["voc_ugm3"]["time"] = timestamp;
+
+    doc["params"]["ch2o_ugm3"]["value"] = data.voc_co2_hcho_data.ch2o_mgm3;  // 甲醛浓度 (mg/m³)
+    doc["params"]["ch2o_ugm3"]["time"] = timestamp;
+
+    doc["params"]["co2_ugm3"]["value"] = data.voc_co2_hcho_data.co2_mgm3;  // CO₂浓度 (mg/m³)
+    doc["params"]["co2_ugm3"]["time"] = timestamp;
+  }
+#endif
+
 #if ENABLE_HW181_MIC
   // 添加HW181-MIC分贝检测数据（如果有效且已校准）
   if (data.mic_data.valid && data.mic_data.calibrated) {
