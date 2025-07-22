@@ -292,9 +292,9 @@ void readSensorData() {
   // 显示VOC-CO2-HCHO传感器数据
   if (data.voc_co2_hcho_data.valid) {
     Serial.println("--- VOC-CO2-HCHO三合一传感器数据 ---");
-    Serial.printf("TVOC浓度: %.3f mg/m³\n", data.voc_co2_hcho_data.tvoc_mgm3);
-    Serial.printf("甲醛浓度: %.3f mg/m³\n", data.voc_co2_hcho_data.ch2o_mgm3);
-    Serial.printf("CO₂浓度: %.3f mg/m³\n", data.voc_co2_hcho_data.co2_mgm3);
+    Serial.printf("TVOC浓度: %.0f μg/m³\n", data.voc_co2_hcho_data.tvoc_mgm3 * 1000);
+    Serial.printf("甲醛浓度: %.0f μg/m³\n", data.voc_co2_hcho_data.ch2o_mgm3 * 1000);
+    Serial.printf("CO₂浓度: %.0f μg/m³\n", data.voc_co2_hcho_data.co2_mgm3 * 1000);
   } else {
     Serial.println("VOC-CO2-HCHO: 无有效数据");
   }

@@ -447,14 +447,14 @@ bool MQTTManager::publishSensorData(const SensorData& data) {
 #if ENABLE_VOC_CO2_HCHO
   // 添加VOC-CO2-HCHO三合一传感器数据（如果有效）
   if (data.voc_co2_hcho_data.valid) {
-    // 将mg/m³转换为μg/m³以保持与21VOC传感器的一致性
-    doc["params"]["voc_ugm3"]["value"] = data.voc_co2_hcho_data.tvoc_mgm3;  // TVOC浓度 (mg/m³)
+    // 将mg/m³转换为μg/m³ (1 mg/m³ = 1000 μg/m³)
+    doc["params"]["voc_ugm3"]["value"] = data.voc_co2_hcho_data.tvoc_mgm3 * 1000;  // TVOC浓度转换为 μg/m³
     doc["params"]["voc_ugm3"]["time"] = timestamp;
 
-    doc["params"]["ch2o_ugm3"]["value"] = data.voc_co2_hcho_data.ch2o_mgm3;  // 甲醛浓度 (mg/m³)
+    doc["params"]["ch2o_ugm3"]["value"] = data.voc_co2_hcho_data.ch2o_mgm3 * 1000;  // 甲醛浓度转换为 μg/m³
     doc["params"]["ch2o_ugm3"]["time"] = timestamp;
 
-    doc["params"]["eco2_ppm"]["value"] = data.voc_co2_hcho_data.co2_mgm3;  // CO₂浓度 (mg/m³)
+    doc["params"]["eco2_ppm"]["value"] = data.voc_co2_hcho_data.co2_mgm3 * 1000;  // CO₂浓度转换为 μg/m³
     doc["params"]["eco2_ppm"]["time"] = timestamp;
   }
 #endif

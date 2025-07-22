@@ -2070,9 +2070,9 @@ void SensorManager::printVOCCO2HCHOReading(const VOCData &data)
 {
   Serial.println("📊 === VOC-CO2-HCHO传感器读数 ===");
   Serial.printf("⏰ 时间戳: %lu ms\n", data.timestamp);
-  Serial.printf("🌿 TVOC浓度: %.3f mg/m³\n", data.tvoc_mgm3);
-  Serial.printf("🏠 甲醛(CH₂O): %.3f mg/m³\n", data.ch2o_mgm3);
-  Serial.printf("💨 CO₂浓度: %.3f mg/m³\n", data.co2_mgm3);
+  Serial.printf("🌿 TVOC浓度: %.0f μg/m³\n", data.tvoc_mgm3 * 1000);
+  Serial.printf("🏠 甲醛(CH₂O): %.0f μg/m³\n", data.ch2o_mgm3 * 1000);
+  Serial.printf("💨 CO₂浓度: %.0f μg/m³\n", data.co2_mgm3 * 1000);
   Serial.println("===============================");
 }
 
@@ -2155,47 +2155,50 @@ void SensorManager::showVOCCO2HCHOData()
     // 显示数据质量评估
     Serial.println("🔍 === 数据质量评估 ===");
 
-    // TVOC浓度评估
+    // TVOC浓度评估 (转换为μg/m³进行评估)
+    float tvoc_ugm3 = lastVOCReading.tvoc_mgm3 * 1000;
     String tvocLevel;
-    if (lastVOCReading.tvoc_mgm3 <= 0.3)
+    if (tvoc_ugm3 <= 300)
       tvocLevel = "优秀 ✅";
-    else if (lastVOCReading.tvoc_mgm3 <= 0.6)
+    else if (tvoc_ugm3 <= 600)
       tvocLevel = "良好 🟢";
-    else if (lastVOCReading.tvoc_mgm3 <= 1.0)
+    else if (tvoc_ugm3 <= 1000)
       tvocLevel = "一般 🟡";
-    else if (lastVOCReading.tvoc_mgm3 <= 3.0)
+    else if (tvoc_ugm3 <= 3000)
       tvocLevel = "较差 🟠";
     else
       tvocLevel = "很差 🔴";
-    Serial.printf("🌿 TVOC浓度: %s (%.3f mg/m³)\n", tvocLevel.c_str(), lastVOCReading.tvoc_mgm3);
+    Serial.printf("🌿 TVOC浓度: %s (%.0f μg/m³)\n", tvocLevel.c_str(), tvoc_ugm3);
 
-    // 甲醛安全性评估
+    // 甲醛安全性评估 (转换为μg/m³进行评估)
+    float ch2o_ugm3 = lastVOCReading.ch2o_mgm3 * 1000;
     String hchoLevel;
-    if (lastVOCReading.ch2o_mgm3 <= 0.08)
+    if (ch2o_ugm3 <= 80)
       hchoLevel = "安全 ✅";
-    else if (lastVOCReading.ch2o_mgm3 <= 0.10)
+    else if (ch2o_ugm3 <= 100)
       hchoLevel = "可接受 🟢";
-    else if (lastVOCReading.ch2o_mgm3 <= 0.12)
+    else if (ch2o_ugm3 <= 120)
       hchoLevel = "需关注 🟡";
-    else if (lastVOCReading.ch2o_mgm3 <= 0.15)
+    else if (ch2o_ugm3 <= 150)
       hchoLevel = "危险 🔴";
     else
       hchoLevel = "极危险 ⚠️";
-    Serial.printf("🏠 甲醛安全性: %s (%.3f mg/m³)\n", hchoLevel.c_str(), lastVOCReading.ch2o_mgm3);
+    Serial.printf("🏠 甲醛安全性: %s (%.0f μg/m³)\n", hchoLevel.c_str(), ch2o_ugm3);
 
-    // CO₂浓度评估
+    // CO₂浓度评估 (转换为μg/m³进行评估)
+    float co2_ugm3 = lastVOCReading.co2_mgm3 * 1000;
     String co2Level;
-    if (lastVOCReading.co2_mgm3 <= 0.7)
+    if (co2_ugm3 <= 700)
       co2Level = "新鲜空气 ✅";
-    else if (lastVOCReading.co2_mgm3 <= 1.0)
+    else if (co2_ugm3 <= 1000)
       co2Level = "可接受 🟢";
-    else if (lastVOCReading.co2_mgm3 <= 1.8)
+    else if (co2_ugm3 <= 1800)
       co2Level = "令人困倦 🟡";
-    else if (lastVOCReading.co2_mgm3 <= 2.7)
+    else if (co2_ugm3 <= 2700)
       co2Level = "闷热 🟠";
     else
       co2Level = "非常闷热 🔴";
-    Serial.printf("💨 CO₂浓度: %s (%.3f mg/m³)\n", co2Level.c_str(), lastVOCReading.co2_mgm3);
+    Serial.printf("💨 CO₂浓度: %s (%.0f μg/m³)\n", co2Level.c_str(), co2_ugm3);
 
     Serial.println("=====================");
   }
