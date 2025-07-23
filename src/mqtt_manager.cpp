@@ -402,24 +402,35 @@ bool MQTTManager::publishSensorData(const SensorData& data) {
 
   // 构建params对象 - 使用完整字段名，保持和原有OneNET物模型一致
 #if ENABLE_BMP280
-  doc["params"]["temperature"]["value"] = data.temperature;  // 浮点数
-  doc["params"]["temperature"]["time"] = timestamp;
+  // 只添加有效的BMP280数据（非NaN和非null）
+  if (!isnan(data.temperature) && data.temperature != 0.0) {
+    doc["params"]["temperature"]["value"] = data.temperature;  // 浮点数
+    doc["params"]["temperature"]["time"] = timestamp;
+  }
 
-  doc["params"]["pressure"]["value"] = data.pressure;  // 浮点数
-  doc["params"]["pressure"]["time"] = timestamp;
+  if (!isnan(data.pressure) && data.pressure != 0.0) {
+    doc["params"]["pressure"]["value"] = data.pressure;  // 浮点数
+    doc["params"]["pressure"]["time"] = timestamp;
+  }
 
-  doc["params"]["altitude"]["value"] = data.altitude;  // 浮点数
-  doc["params"]["altitude"]["time"] = timestamp;
+  if (!isnan(data.altitude) && data.altitude != 0.0) {
+    doc["params"]["altitude"]["value"] = data.altitude;  // 浮点数
+    doc["params"]["altitude"]["time"] = timestamp;
+  }
 #endif
 
 #if ENABLE_MQ135
-  // 添加MQ135空气质量数据（如果传感器已校准）
+  // 添加MQ135空气质量数据（如果传感器已校准且数据有效）
   if (data.mq135_calibrated) {
-    doc["params"]["air_quality_ppm"]["value"] = (int)round(data.air_quality_ppm);  // ppm保持整数
-    doc["params"]["air_quality_ppm"]["time"] = timestamp;
+    if (!isnan(data.air_quality_ppm) && data.air_quality_ppm > 0.0) {
+      doc["params"]["air_quality_ppm"]["value"] = (int)round(data.air_quality_ppm);  // ppm保持整数
+      doc["params"]["air_quality_ppm"]["time"] = timestamp;
+    }
 
-    doc["params"]["air_quality_corrected_ppm"]["value"] = (int)round(data.air_quality_corrected_ppm);  // ppm保持整数
-    doc["params"]["air_quality_corrected_ppm"]["time"] = timestamp;
+    if (!isnan(data.air_quality_corrected_ppm) && data.air_quality_corrected_ppm > 0.0) {
+      doc["params"]["air_quality_corrected_ppm"]["value"] = (int)round(data.air_quality_corrected_ppm);  // ppm保持整数
+      doc["params"]["air_quality_corrected_ppm"]["time"] = timestamp;
+    }
   }
 #endif
 
@@ -435,12 +446,16 @@ bool MQTTManager::publishSensorData(const SensorData& data) {
     doc["params"]["eco2_ppm"]["value"] = data.tvoc_data.eco2_ppm;  // ppm保持整数
     doc["params"]["eco2_ppm"]["time"] = timestamp;
 
-    // 使用21VOC的温湿度数据覆盖BMP280的温度（如果可用）
-    doc["params"]["temperature"]["value"] = data.tvoc_data.temperature_c;  // 浮点数
-    doc["params"]["temperature"]["time"] = timestamp;
+    // 使用21VOC的温湿度数据覆盖BMP280的温度（如果可用且有效）
+    if (!isnan(data.tvoc_data.temperature_c) && data.tvoc_data.temperature_c != 0.0) {
+      doc["params"]["temperature"]["value"] = data.tvoc_data.temperature_c;  // 浮点数
+      doc["params"]["temperature"]["time"] = timestamp;
+    }
 
-    doc["params"]["humidity_rh"]["value"] = data.tvoc_data.humidity_rh;  // 浮点数
-    doc["params"]["humidity_rh"]["time"] = timestamp;
+    if (!isnan(data.tvoc_data.humidity_rh) && data.tvoc_data.humidity_rh != 0.0) {
+      doc["params"]["humidity_rh"]["value"] = data.tvoc_data.humidity_rh;  // 浮点数
+      doc["params"]["humidity_rh"]["time"] = timestamp;
+    }
   }
 #endif
 
@@ -462,15 +477,18 @@ bool MQTTManager::publishSensorData(const SensorData& data) {
 #if ENABLE_HW181_MIC
   // 添加HW181-MIC分贝检测数据（如果有效且已校准）
   if (data.mic_data.valid && data.mic_data.calibrated) {
-    doc["params"]["decibels"]["value"] = data.mic_data.decibels;  // 浮点数
-    doc["params"]["decibels"]["time"] = timestamp;
+    if (!isnan(data.mic_data.decibels) && data.mic_data.decibels > 0.0) {
+      doc["params"]["decibels"]["value"] = data.mic_data.decibels;  // 浮点数
+      doc["params"]["decibels"]["time"] = timestamp;
+    }
 
     doc["params"]["sound_detected"]["value"] = data.mic_data.sound_detected ? 1 : 0;  // 布尔值转整数
     doc["params"]["sound_detected"]["time"] = timestamp;
 
-    doc["params"]["sound_voltage"]["value"] = data.mic_data.sound_voltage;  // 声音电压值（浮点数）
-    doc["params"]["sound_voltage"]["time"] = timestamp;
-
+    if (!isnan(data.mic_data.sound_voltage) && data.mic_data.sound_voltage >= 0.0) {
+      doc["params"]["sound_voltage"]["value"] = data.mic_data.sound_voltage;  // 声音电压值（浮点数）
+      doc["params"]["sound_voltage"]["time"] = timestamp;
+    }
   }
 #endif
 
